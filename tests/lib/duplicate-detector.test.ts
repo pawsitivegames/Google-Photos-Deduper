@@ -1,6 +1,21 @@
-import { describe, it, expect } from "vitest"
-import { communityDetection, matMul, topK, groupByTimestamp, withinGroupDuplicates, selectDefaultKeep, fullDetectDuplicates } from "../../lib/duplicate-detector"
+import { afterEach, describe, it, expect, vi } from "vitest"
+import {
+  blockPairCountForItems,
+  communityDetection,
+  computeEmbeddings,
+  fullDetectDuplicates,
+  groupByTimestamp,
+  matMul,
+  selectDefaultKeep,
+  shouldCompareSmartTimestamps,
+  topK,
+  withinGroupDuplicates,
+} from "../../lib/duplicate-detector"
 import type { GpdMediaItem } from "../../lib/types"
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
 
 // ============================================================
 // Helpers
@@ -110,6 +125,97 @@ describe("matMul", () => {
 })
 
 // ============================================================
+// computeEmbeddings worker failure handling
+// ============================================================
+
+describe("computeEmbeddings", () => {
+  it("drops cached embeddings whose dimension does not match the dominant cache dimension", async () => {
+    const cache = {
+      getCompatibleMany: vi.fn().mockResolvedValue([
+        new Float32Array([1, 0, 0]),
+        new Float32Array([1, 0]),
+        new Float32Array([0, 1, 0])
+      ])
+    }
+
+    const { embeddings, validIndices } = await computeEmbeddings(
+      [null, null, null],
+      [
+        makeItem("cached-a", 1000),
+        makeItem("cached-corrupt", 2000),
+        makeItem("cached-b", 3000)
+      ],
+      cache as never,
+      new Set(["cached-a", "cached-corrupt", "cached-b"])
+    )
+
+    expect(cache.getCompatibleMany).toHaveBeenCalled()
+    expect(embeddings.map((embedding) => embedding.length)).toEqual([3, 3])
+    expect(validIndices).toEqual([0, 2])
+  })
+
+  it("fails the scan when an embedding worker crashes mid-batch", async () => {
+    const originalChrome = globalThis.chrome
+    const originalWorker = globalThis.Worker
+    const originalFetch = globalThis.fetch
+    const originalNavigator = globalThis.navigator
+
+    const modelBuffer = new ArrayBuffer(8)
+    vi.stubGlobal("chrome", {
+      runtime: { getURL: (path: string) => `chrome-extension://test/${path}` }
+    })
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        arrayBuffer: async () => modelBuffer
+      })
+    )
+    vi.stubGlobal("navigator", { hardwareConcurrency: 1 })
+
+    class FailingWorker {
+      onmessage: ((event: MessageEvent) => void) | null = null
+      onerror: ((event: ErrorEvent) => void) | null = null
+      terminated = false
+
+      constructor(_url: string) {}
+
+      postMessage(message: { type: string }) {
+        if (message.type === "init") {
+          queueMicrotask(() => this.onmessage?.({ data: { type: "ready" } } as MessageEvent))
+          return
+        }
+        if (message.type === "embed") {
+          queueMicrotask(() =>
+            this.onerror?.({ message: "worker crashed" } as ErrorEvent)
+          )
+        }
+      }
+
+      terminate() {
+        this.terminated = true
+      }
+    }
+
+    vi.stubGlobal("Worker", FailingWorker)
+
+    await expect(
+      computeEmbeddings(
+        [new Blob(["image"])],
+        [makeItem("worker-fail", 1000)],
+        null,
+        new Set()
+      )
+    ).rejects.toThrow("worker crashed")
+
+    vi.stubGlobal("chrome", originalChrome)
+    vi.stubGlobal("Worker", originalWorker)
+    vi.stubGlobal("fetch", originalFetch)
+    vi.stubGlobal("navigator", originalNavigator)
+  })
+})
+
+// ============================================================
 // communityDetection — with synthetic embeddings
 // These tests mirror the correctness guarantees of the original
 // Python DuplicateImageDetector tests (which used real images).
@@ -204,6 +310,26 @@ describe("communityDetection", () => {
   })
 })
 
+describe("blockPairCountForItems", () => {
+  it("counts triangular block pairs for exhaustive full scans", () => {
+    expect(blockPairCountForItems(0, 1000)).toBe(0)
+    expect(blockPairCountForItems(1, 1000)).toBe(0)
+    expect(blockPairCountForItems(2, 1000)).toBe(1)
+    expect(blockPairCountForItems(1000, 1000)).toBe(1)
+    expect(blockPairCountForItems(1001, 1000)).toBe(3)
+    expect(blockPairCountForItems(11000, 1000)).toBe(66)
+  })
+
+  it("rejects invalid block sizes", () => {
+    expect(() => blockPairCountForItems(2, 0)).toThrow(
+      /Invalid full-scan block size/
+    )
+    expect(() => blockPairCountForItems(2, Number.NaN)).toThrow(
+      /Invalid full-scan block size/
+    )
+  })
+})
+
 // ============================================================
 // Helper: build a minimal GpdMediaItem for testing
 // ============================================================
@@ -259,6 +385,23 @@ describe("fullDetectDuplicates — candidate filtering", () => {
     expect(timing.candidates).toBe(1)
     expect(timing.totalItems).toBe(2)
   })
+
+  it("fails instead of reporting no duplicates when all candidate thumbnails fail", async () => {
+    const originalFetch = globalThis.fetch
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        body: { cancel: vi.fn() }
+      })
+    )
+
+    await expect(
+      fullDetectDuplicates([makeItem("a", 1000), makeItem("b", 2000)], 0.99)
+    ).rejects.toThrow(/Only 0 of 2 candidate items could be processed/)
+
+    vi.stubGlobal("fetch", originalFetch)
+  })
 })
 
 // ============================================================
@@ -313,20 +456,44 @@ describe("groupByTimestamp", () => {
     expect(result[0].map((i) => i.mediaKey)).toEqual(expect.arrayContaining(["b", "c"]))
   })
 
-  it("windowMs=1000 groups items within the same second", () => {
+  it("windowMs=1000 groups nearby items", () => {
     const a = makeItem("a", 1100)
     const b = makeItem("b", 1800)
-    // Both floor to 1000 with windowMs=1000
     const result = groupByTimestamp([a, b], 1000)
     expect(result).toHaveLength(1)
   })
 
-  it("windowMs=1000 keeps items in different seconds separate", () => {
+  it("windowMs=1000 groups nearby items across fixed bucket boundaries", () => {
     const a = makeItem("a", 999)
     const b = makeItem("b", 1001)
-    // a floors to 0, b floors to 1000
+    const result = groupByTimestamp([a, b], 1000)
+    expect(result).toHaveLength(1)
+  })
+
+  it("windowMs=1000 keeps distant items separate", () => {
+    const a = makeItem("a", 999)
+    const b = makeItem("b", 2500)
     const result = groupByTimestamp([a, b], 1000)
     expect(result).toHaveLength(0)
+  })
+
+  it("windowMs=1000 can form a chain bucket for adjacent timestamps", () => {
+    const result = groupByTimestamp(
+      [makeItem("a", 0), makeItem("b", 900), makeItem("c", 1800)],
+      1000
+    )
+    expect(result).toHaveLength(1)
+    expect(result[0].map((item) => item.mediaKey)).toEqual(["a", "b", "c"])
+  })
+})
+
+describe("shouldCompareSmartTimestamps", () => {
+  it("allows boundary-crossing pairs within the smart window", () => {
+    expect(shouldCompareSmartTimestamps(999, 1001, 1000)).toBe(true)
+  })
+
+  it("rejects distant endpoints from a proximity chain", () => {
+    expect(shouldCompareSmartTimestamps(0, 1800, 1000)).toBe(false)
   })
 })
 
@@ -462,12 +629,7 @@ describe("withinGroupDuplicates", () => {
 describe("selectDefaultKeep", () => {
   function item(
     key: string,
-    opts: {
-      isOriginalQuality?: boolean | null
-      resWidth?: number
-      resHeight?: number
-      creationTimestamp?: number
-    } = {},
+    opts: Partial<GpdMediaItem> = {},
   ): GpdMediaItem {
     return {
       mediaKey: key,
@@ -478,6 +640,7 @@ describe("selectDefaultKeep", () => {
       resWidth: opts.resWidth,
       resHeight: opts.resHeight,
       isOriginalQuality: opts.isOriginalQuality,
+      ...opts,
     }
   }
 
@@ -511,10 +674,98 @@ describe("selectDefaultKeep", () => {
     expect(selectDefaultKeep([small, large])).toBe("large")
   })
 
-  it("prefers oldest upload date as tiebreaker when quality and resolution are equal", () => {
+  it("prefers oldest taken date over higher resolution when quality is tied", () => {
+    const newerLarge = item("newerLarge", {
+      isOriginalQuality: true,
+      timestamp: Date.parse("2024-01-01T00:00:00.000Z"),
+      resWidth: 4000,
+      resHeight: 3000
+    })
+    const olderSmall = item("olderSmall", {
+      isOriginalQuality: true,
+      timestamp: Date.parse("2021-01-01T00:00:00.000Z"),
+      resWidth: 1000,
+      resHeight: 1000
+    })
+    expect(selectDefaultKeep([newerLarge, olderSmall])).toBe("olderSmall")
+  })
+
+  it("prefers an item with a taken date over a missing taken date when quality ties", () => {
+    const missingTaken = item("missingTaken", {
+      isOriginalQuality: true,
+      timestamp: undefined,
+      resWidth: 4000,
+      resHeight: 3000
+    })
+    const withTaken = item("withTaken", {
+      isOriginalQuality: true,
+      timestamp: Date.parse("2024-01-01T00:00:00.000Z"),
+      resWidth: 1000,
+      resHeight: 1000
+    })
+    expect(selectDefaultKeep([missingTaken, withTaken])).toBe("withTaken")
+  })
+
+  it("falls back to resolution when all tied-quality items are missing taken dates", () => {
+    const small = item("small", {
+      isOriginalQuality: true,
+      timestamp: undefined,
+      resWidth: 1000,
+      resHeight: 1000
+    })
+    const large = item("large", {
+      isOriginalQuality: true,
+      timestamp: undefined,
+      resWidth: 4000,
+      resHeight: 3000
+    })
+    expect(selectDefaultKeep([small, large])).toBe("large")
+  })
+
+  it("prefers a newer taken item when it is better quality", () => {
+    const olderSaver = item("olderSaver", {
+      isOriginalQuality: false,
+      timestamp: Date.parse("2021-01-01T00:00:00.000Z"),
+      resWidth: 4000,
+      resHeight: 3000
+    })
+    const newerOriginal = item("newerOriginal", {
+      isOriginalQuality: true,
+      timestamp: Date.parse("2024-01-01T00:00:00.000Z"),
+      resWidth: 1000,
+      resHeight: 1000
+    })
+    expect(selectDefaultKeep([olderSaver, newerOriginal])).toBe(
+      "newerOriginal"
+    )
+  })
+
+  it("prefers oldest upload date as tiebreaker when quality, taken date, and resolution are equal", () => {
     const newer = item("newer", { isOriginalQuality: true, resWidth: 1920, resHeight: 1080, creationTimestamp: 200 })
     const older = item("older", { isOriginalQuality: true, resWidth: 1920, resHeight: 1080, creationTimestamp: 100 })
     expect(selectDefaultKeep([newer, older])).toBe("older")
+  })
+
+  it("prefers richer metadata for an exact two-item pair", () => {
+    const highQualitySparse = item("sparse", {
+      isOriginalQuality: true,
+      resWidth: 4000,
+      resHeight: 3000
+    })
+    const metadataRich = item("metadata", {
+      isOriginalQuality: false,
+      resWidth: 1000,
+      resHeight: 1000,
+      fileName: "metadata-rich.jpg",
+      size: 123456,
+      takesUpSpace: true,
+      spaceTaken: 123456,
+      productUrl: "https://photos.google.com/photo/metadata"
+    })
+    metadataRich.dedupKey = highQualitySparse.dedupKey
+    expect(selectDefaultKeep([highQualitySparse, metadataRich])).toBe(
+      "metadata"
+    )
   })
 
   it("handles undefined resolution fields (treats as 0 pixels)", () => {

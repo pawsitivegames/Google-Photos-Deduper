@@ -7,28 +7,40 @@
  * - Zoom button opens the photo viewer modal
  * - Zoom button does not trigger onToggleKept (stopPropagation)
  */
-import { describe, it, expect, vi } from "vitest"
-import { render, screen, fireEvent } from "@testing-library/react"
-import { ThemeProvider, createTheme } from "@mui/material/styles"
+import { createTheme, ThemeProvider } from "@mui/material/styles"
+import { fireEvent, render, screen } from "@testing-library/react"
+import { describe, expect, it, vi } from "vitest"
+
 import { DuplicateGroups } from "../../components/DuplicateGroups"
-import type { GpdMediaItem, DuplicateGroup } from "../../lib/types"
+import type { DuplicateGroup, GpdMediaItem } from "../../lib/types"
 
 // ============================================================
 // Mocks
 // ============================================================
 
 vi.mock("../../components/useBlobUrl", () => ({
-  useBlobUrl: (url: string | undefined) => ({ blobUrl: url ? `blob:${url}` : undefined, loading: false }),
+  useBlobUrl: (url: string | undefined) => ({
+    blobUrl: url ? `blob:${url}` : undefined,
+    loading: false
+  })
 }))
 
 // Stub PhotoViewerModal so we can assert it opens without rendering the full dialog
 vi.mock("../../components/PhotoViewerModal", () => ({
-  PhotoViewerModal: ({ open, items, onClose }: { open: boolean; items: unknown[]; onClose: () => void }) =>
+  PhotoViewerModal: ({
+    open,
+    items,
+    onClose
+  }: {
+    open: boolean
+    items: unknown[]
+    onClose: () => void
+  }) =>
     open ? (
       <div data-testid="viewer-modal" data-item-count={items.length}>
         <button onClick={onClose}>close-modal</button>
       </div>
-    ) : null,
+    ) : null
 }))
 
 // ============================================================
@@ -52,7 +64,7 @@ function makeItem(mediaKey: string): GpdMediaItem {
     resWidth: 1920,
     resHeight: 1080,
     fileName: `${mediaKey}.jpg`,
-    isOwned: true,
+    isOwned: true
   }
 }
 
@@ -63,7 +75,7 @@ function makeGroup(id: string, ...mediaKeys: string[]): DuplicateGroup {
 const mediaItems: Record<string, GpdMediaItem> = {
   img1: makeItem("img1"),
   img2: makeItem("img2"),
-  img3: makeItem("img3"),
+  img3: makeItem("img3")
 }
 
 const group = makeGroup("g1", "img1", "img2", "img3")
@@ -74,7 +86,7 @@ const defaultProps = {
   selectedGroupIds: new Set(["g1"]),
   onToggleGroup: vi.fn(),
   keptByGroupId: new Map([["g1", new Set(["img1"])]]),
-  onToggleKept: vi.fn(),
+  onToggleKept: vi.fn()
 }
 
 // ============================================================
@@ -117,6 +129,42 @@ describe("DuplicateGroups — chip rendering", () => {
     const trashChips = screen.getAllByText("Trash")
     expect(trashChips).toHaveLength(1) // only img3
   })
+
+  it("shows exact duplicate classification when metadata matches", () => {
+    wrap(
+      <DuplicateGroups
+        {...defaultProps}
+        groups={[
+          {
+            ...group,
+            duplicateKind: "exact",
+            matchReasons: ["same filename", "same dimensions"]
+          }
+        ]}
+      />
+    )
+    expect(screen.getByText("Exact duplicate")).toBeInTheDocument()
+    expect(
+      screen.getByTitle("same filename, same dimensions")
+    ).toBeInTheDocument()
+  })
+
+  it("shows per-item storage accounting status", () => {
+    wrap(
+      <DuplicateGroups
+        {...defaultProps}
+        mediaItems={{
+          img1: { ...makeItem("img1"), takesUpSpace: false },
+          img2: { ...makeItem("img2"), takesUpSpace: true },
+          img3: { ...makeItem("img3"), takesUpSpace: null }
+        }}
+      />
+    )
+
+    expect(screen.getByText("No storage")).toBeInTheDocument()
+    expect(screen.getByText("Counts storage")).toBeInTheDocument()
+    expect(screen.getByText("Storage unknown")).toBeInTheDocument()
+  })
 })
 
 // ============================================================
@@ -124,7 +172,10 @@ describe("DuplicateGroups — chip rendering", () => {
 // ============================================================
 
 describe("DuplicateGroups — group item-kind label", () => {
-  const video = (k: string): GpdMediaItem => ({ ...makeItem(k), duration: 5000 })
+  const video = (k: string): GpdMediaItem => ({
+    ...makeItem(k),
+    duration: 5000
+  })
 
   /** Render a single group built from the given media-item map + key order. */
   function renderGroup(items: Record<string, GpdMediaItem>, keys: string[]) {
@@ -140,10 +191,11 @@ describe("DuplicateGroups — group item-kind label", () => {
   }
 
   it('labels an all-photo group "N photos"', () => {
-    renderGroup(
-      { a: makeItem("a"), b: makeItem("b"), c: makeItem("c") },
-      ["a", "b", "c"]
-    )
+    renderGroup({ a: makeItem("a"), b: makeItem("b"), c: makeItem("c") }, [
+      "a",
+      "b",
+      "c"
+    ])
     expect(screen.getByText(/^3 photos$/)).toBeInTheDocument()
   })
 
@@ -244,5 +296,46 @@ describe("DuplicateGroups — empty state", () => {
   it("shows no duplicates message when groups is empty", () => {
     wrap(<DuplicateGroups {...defaultProps} groups={[]} />)
     expect(screen.getByText(/no duplicates found/i)).toBeInTheDocument()
+  })
+})
+
+// ============================================================
+// Large-list rendering
+// ============================================================
+
+describe("DuplicateGroups — virtualized rendering", () => {
+  it("does not mount every duplicate group in a large result set", () => {
+    const largeMediaItems: Record<string, GpdMediaItem> = {}
+    const largeGroups: DuplicateGroup[] = []
+    const keptByGroupId = new Map<string, Set<string>>()
+    const selectedGroupIds = new Set<string>()
+
+    for (let i = 0; i < 80; i++) {
+      const firstKey = `item-${i}-a`
+      const secondKey = `item-${i}-b`
+      largeMediaItems[firstKey] = makeItem(firstKey)
+      largeMediaItems[secondKey] = makeItem(secondKey)
+      const groupId = `group-${i}`
+      largeGroups.push(makeGroup(groupId, firstKey, secondKey))
+      keptByGroupId.set(groupId, new Set([firstKey]))
+      selectedGroupIds.add(groupId)
+    }
+
+    wrap(
+      <DuplicateGroups
+        {...defaultProps}
+        groups={largeGroups}
+        mediaItems={largeMediaItems}
+        selectedGroupIds={selectedGroupIds}
+        keptByGroupId={keptByGroupId}
+      />
+    )
+
+    expect(
+      screen.getByTestId("duplicate-groups-virtual-list")
+    ).toBeInTheDocument()
+    expect(screen.getByText("80 Duplicate Groups Found")).toBeInTheDocument()
+    expect(screen.getByTitle("item-0-a.jpg")).toBeInTheDocument()
+    expect(screen.queryByTitle("item-79-a.jpg")).not.toBeInTheDocument()
   })
 })

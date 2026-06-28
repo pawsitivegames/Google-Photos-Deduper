@@ -1,9 +1,11 @@
-import { useRef } from "react"
+import Alert from "@mui/material/Alert"
 import Box from "@mui/material/Box"
 import Button from "@mui/material/Button"
 import CircularProgress from "@mui/material/CircularProgress"
 import LinearProgress from "@mui/material/LinearProgress"
 import Typography from "@mui/material/Typography"
+import { useEffect, useRef, useState } from "react"
+
 import type { ScanPhase } from "../lib/types"
 
 interface ScanProgressProps {
@@ -11,7 +13,8 @@ interface ScanProgressProps {
   itemsProcessed: number
   totalEstimate: number
   message: string
-  onCancel?: () => void
+  onPause?: () => void
+  idleWarningMs?: number
 }
 
 const PHASE_LABELS: Record<ScanPhase, string> = {
@@ -19,7 +22,7 @@ const PHASE_LABELS: Record<ScanPhase, string> = {
   downloading_thumbnails: "Downloading thumbnails",
   computing_embeddings: "Computing image similarity",
   detecting_duplicates: "Finding duplicate groups",
-  complete: "Complete",
+  complete: "Complete"
 }
 
 const PHASE_STEP: Record<ScanPhase, number> = {
@@ -27,7 +30,7 @@ const PHASE_STEP: Record<ScanPhase, number> = {
   downloading_thumbnails: 2,
   computing_embeddings: 3,
   detecting_duplicates: 4,
-  complete: 4,
+  complete: 4
 }
 
 const TOTAL_STEPS = 4
@@ -49,15 +52,42 @@ export function ScanProgress({
   itemsProcessed,
   totalEstimate,
   message,
-  onCancel,
+  onPause,
+  idleWarningMs = 120_000
 }: ScanProgressProps) {
+  const [idleMs, setIdleMs] = useState(0)
+  const lastProgressAtRef = useRef(Date.now())
+  const progressSignature = `${phase}:${itemsProcessed}:${totalEstimate}:${message}`
+
+  useEffect(() => {
+    lastProgressAtRef.current = Date.now()
+    setIdleMs(0)
+  }, [progressSignature])
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setIdleMs(Date.now() - lastProgressAtRef.current)
+    }, 1000)
+    return () => window.clearInterval(interval)
+  }, [])
+
   const progress =
     totalEstimate > 0 ? Math.round((itemsProcessed / totalEstimate) * 100) : 0
   const isDeterminate = totalEstimate > 0
+  const showIdleWarning = idleMs >= idleWarningMs
+  const idleMinutes = Math.max(1, Math.floor(idleMs / 60_000))
 
-  const phaseStartRef = useRef<{ phase: ScanPhase; time: number; baseItems: number } | null>(null)
+  const phaseStartRef = useRef<{
+    phase: ScanPhase
+    time: number
+    baseItems: number
+  } | null>(null)
   if (phaseStartRef.current?.phase !== phase) {
-    phaseStartRef.current = { phase, time: Date.now(), baseItems: itemsProcessed }
+    phaseStartRef.current = {
+      phase,
+      time: Date.now(),
+      baseItems: itemsProcessed
+    }
   }
 
   const cachedEtrRef = useRef<{ text: string; updatedAt: number } | null>(null)
@@ -88,7 +118,21 @@ export function ScanProgress({
         Scanning Library
       </Typography>
 
-      <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 2 }}>
+      {showIdleWarning && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          No scan progress for {idleMinutes} minute
+          {idleMinutes === 1 ? "" : "s"}. The scan may still recover, but you
+          can pause and resume if it stays stuck.
+        </Alert>
+      )}
+
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          mb: 2
+        }}>
         <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
           <CircularProgress size={14} thickness={5} />
           <Typography variant="body2" color="text.secondary">
@@ -118,10 +162,14 @@ export function ScanProgress({
         )}
       </Box>
 
-      {onCancel && (
+      {onPause && (
         <Box sx={{ mt: 3 }}>
-          <Button variant="outlined" color="inherit" size="small" onClick={onCancel}>
-            Cancel
+          <Button
+            variant="outlined"
+            color="inherit"
+            size="small"
+            onClick={onPause}>
+            Pause Scan
           </Button>
         </Box>
       )}

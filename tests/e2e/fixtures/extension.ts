@@ -2,12 +2,22 @@
  * Shared helpers for all E2E tests.
  * Handles extension launch, storage injection, and GP auth cookie injection.
  */
-import { chromium, type BrowserContext, type Page } from "@playwright/test"
-import path from "path"
 import fs from "fs"
+import path from "path"
+import {
+  chromium,
+  type Browser,
+  type BrowserContext,
+  type Page
+} from "@playwright/test"
+
+import type { ScanCheckpoint } from "../../../lib/scan-checkpoint"
 import type { DuplicateGroup, GpdMediaItem } from "../../../lib/types"
 
-export const extensionPath = path.resolve(__dirname, "../../../build/chrome-mv3-dev")
+export const extensionPath = path.resolve(
+  __dirname,
+  "../../../build/chrome-mv3-dev"
+)
 
 // ============================================================
 // Connect to an already-running Chrome (full E2E only)
@@ -22,26 +32,70 @@ export const extensionPath = path.resolve(__dirname, "../../../build/chrome-mv3-
  *   Chrome must be running with --remote-debugging-port=9222 AND the extension
  *   loaded (build/chrome-mv3-dev/). The user must be logged into Google Photos.
  *
- *   WSL launch:
- *     "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe"
+ *   macOS launch:
+ *     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
  *       --remote-debugging-port=9222
- *       --user-data-dir="C:\Users\mackt\Chrome Profiles\chrome-debug"
+ *       --user-data-dir="$HOME/chrome-debug"
+ *       --disable-extensions-except=/path/to/build/chrome-mv3-dev
+ *       --load-extension=/path/to/build/chrome-mv3-dev
  *
  * After tests, browser.close() only disconnects Playwright — Chrome stays open.
  */
 export async function connectToChrome(
   cdpUrl = process.env.CDP_URL || "http://localhost:9222"
-): Promise<{ browser: import("@playwright/test").Browser; context: BrowserContext; extensionId: string }> {
-  let browser: import("@playwright/test").Browser
+): Promise<{
+  browser: Browser
+  context: BrowserContext
+  extensionId: string
+}> {
+  const userDataDir = process.env.GPD_E2E_USER_DATA_DIR
+  if (userDataDir) {
+    const context = await chromium.launchPersistentContext(
+      path.resolve(userDataDir),
+      {
+        headless: false,
+        args: [
+          `--disable-extensions-except=${extensionPath}`,
+          `--load-extension=${extensionPath}`,
+          "--enable-unsafe-extension-debugging",
+          "--no-sandbox"
+        ]
+      }
+    )
+    let sw = context.serviceWorkers()[0]
+    if (!sw) sw = await context.waitForEvent("serviceworker")
+    const extensionId = new URL(sw.url()).hostname
+    const browser = {
+      close: () => context.close()
+    } as Browser
+    return { browser, context, extensionId }
+  }
+
+  let browser: Browser
   try {
     browser = await chromium.connectOverCDP(cdpUrl)
   } catch {
+    const macCommand =
+      `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \\\n` +
+      `    --remote-debugging-port=9222 \\\n` +
+      `    --user-data-dir="$HOME/chrome-debug" \\\n` +
+      `    --disable-extensions-except="${extensionPath}" \\\n` +
+      `    --load-extension="${extensionPath}"`
+    const wslCommand =
+      `"/mnt/c/Program Files/Google/Chrome/Application/chrome.exe" \\\n` +
+      `    --remote-debugging-port=9222 \\\n` +
+      `    --user-data-dir="C:\\\\Users\\\\<you>\\\\Chrome Profiles\\\\chrome-debug" \\\n` +
+      `    --disable-extensions-except=/path/to/build/chrome-mv3-dev \\\n` +
+      `    --load-extension=/path/to/build/chrome-mv3-dev`
     throw new Error(
       `Could not connect to Chrome at ${cdpUrl}.\n` +
-      `Start Chrome with remote debugging:\n` +
-      `  "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe" \\\n` +
-      `    --remote-debugging-port=9222 \\\n` +
-      `    --user-data-dir="C:\\\\Users\\\\mackt\\\\Chrome Profiles\\\\chrome-debug"`
+        `Start Chrome with remote debugging and load ${extensionPath}.\n\n` +
+        `Alternatively, let Playwright launch an existing profile:\n` +
+        `  GPD_E2E_USER_DATA_DIR=.chrome-live-validation npm run test:e2e\n\n` +
+        `macOS:\n` +
+        `  ${macCommand}\n\n` +
+        `Windows WSL:\n` +
+        `  ${wslCommand}`
     )
   }
 
@@ -63,7 +117,10 @@ export async function connectToChrome(
     for (const page of context.pages()) {
       const url = page.url()
       // Must be a chrome-extension:// URL with a proper 32-char extension ID
-      if (url.startsWith("chrome-extension://") && new URL(url).hostname.length === 32) {
+      if (
+        url.startsWith("chrome-extension://") &&
+        new URL(url).hostname.length === 32
+      ) {
         extensionId = new URL(url).hostname
         break
       }
@@ -73,7 +130,7 @@ export async function connectToChrome(
   if (!extensionId) {
     throw new Error(
       "Could not find the extension ID.\n" +
-      "Make sure the extension is loaded in Chrome (build/chrome-mv3-dev/)."
+        "Make sure the extension is loaded in Chrome (build/chrome-mv3-dev/)."
     )
   }
 
@@ -93,8 +150,8 @@ export async function launchExtension(): Promise<{
     args: [
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,
-      "--no-sandbox",
-    ],
+      "--no-sandbox"
+    ]
   })
 
   let sw = context.serviceWorkers()[0]
@@ -104,7 +161,10 @@ export async function launchExtension(): Promise<{
   return { context, extensionId }
 }
 
-export function openAppTab(context: BrowserContext, extensionId: string): Promise<Page> {
+export function openAppTab(
+  context: BrowserContext,
+  extensionId: string
+): Promise<Page> {
   return context.newPage().then((page) => {
     return page
       .goto(`chrome-extension://${extensionId}/tabs/app.html`)
@@ -120,18 +180,27 @@ export async function injectScanResults(
   context: BrowserContext,
   groups: object[],
   mediaItems: Record<string, object>,
-  totalItems: number
+  totalItems: number,
+  accountEmail: string | null = "test@example.com"
 ): Promise<void> {
   const sw = context.serviceWorkers()[0]
   await sw.evaluate(
-    ({ groups, mediaItems, totalItems }) =>
+    ({ groups, mediaItems, totalItems, accountEmail }) =>
       new Promise<void>((resolve) => {
         chrome.storage.local.set(
-          { scanResults: { groups, mediaItems, totalItems, scanDate: Date.now() } },
+          {
+            scanResults: {
+              groups,
+              mediaItems,
+              totalItems,
+              scanDate: Date.now(),
+              ...(accountEmail ? { accountEmail } : {})
+            }
+          },
           resolve
         )
       }),
-    { groups, mediaItems, totalItems }
+    { groups, mediaItems, totalItems, accountEmail }
   )
 }
 
@@ -144,9 +213,26 @@ export async function injectSelections(
   await sw.evaluate(
     ({ selectedGroupIds, keptOverrides }) =>
       new Promise<void>((resolve) => {
-        chrome.storage.local.set({ selections: { selectedGroupIds, keptOverrides } }, resolve)
+        chrome.storage.local.set(
+          { selections: { selectedGroupIds, keptOverrides } },
+          resolve
+        )
       }),
     { selectedGroupIds, keptOverrides }
+  )
+}
+
+export async function injectScanCheckpoint(
+  context: BrowserContext,
+  scanCheckpoint: ScanCheckpoint
+): Promise<void> {
+  const sw = context.serviceWorkers()[0]
+  await sw.evaluate(
+    (scanCheckpoint) =>
+      new Promise<void>((resolve) => {
+        chrome.storage.local.set({ scanCheckpoint }, resolve)
+      }),
+    scanCheckpoint
   )
 }
 
@@ -161,24 +247,9 @@ export async function clearStorage(context: BrowserContext): Promise<void> {
       return
     }
   }
-  await sw.evaluate(() => new Promise<void>((resolve) => chrome.storage.local.clear(resolve)))
-}
-
-// ============================================================
-// Google Photos auth (full E2E only)
-// ============================================================
-
-/**
- * Inject Google Photos auth cookies into the browser context.
- * Reads from GP_AUTH_COOKIES env var (base64 JSON, for CI) or
- * .gp-auth.json file (for local dev).
- *
- * To generate .gp-auth.json: npm run auth:export
- * To set up CI: base64 -w0 .gp-auth.json → paste as GP_AUTH_COOKIES secret
- */
-export async function injectGpAuth(context: BrowserContext): Promise<void> {
-  const cookies = loadGpCookies()
-  await context.addCookies(cookies)
+  await sw.evaluate(
+    () => new Promise<void>((resolve) => chrome.storage.local.clear(resolve))
+  )
 }
 
 // ============================================================
@@ -195,9 +266,12 @@ const gptkStubHtml = fs.readFileSync(
  * Set `success: false` to force a command to fail.
  */
 export interface GptkOverrides {
-  trashItems?: { success: false; error: string }
-  restoreItems?: { success: false; error: string }
-  [command: string]: { success: false; error: string } | { data: unknown } | undefined
+  trashItems?: { success: false; error: string; data?: unknown }
+  restoreItems?: { success: false; error: string; data?: unknown }
+  [command: string]:
+    | { success: false; error: string; data?: unknown }
+    | { data: unknown }
+    | undefined
 }
 
 /**
@@ -219,7 +293,7 @@ export async function openGptkStubPage(
     await route.fulfill({
       status: 200,
       contentType: "text/html",
-      body: gptkStubHtml,
+      body: gptkStubHtml
     })
   })
 
@@ -229,7 +303,9 @@ export async function openGptkStubPage(
   // Inject overrides so the stub responds as configured
   if (Object.keys(overrides).length > 0) {
     await page.evaluate((ov) => {
-      ;(window as unknown as { __gptkOverrides: GptkOverrides }).__gptkOverrides = ov
+      ;(
+        window as unknown as { __gptkOverrides: GptkOverrides }
+      ).__gptkOverrides = ov
     }, overrides)
   }
 
@@ -258,8 +334,8 @@ export async function waitForAppState(
  * Build N duplicate groups where each group has `itemsPerGroup` items.
  * Returns both the groups array and a matching mediaItems record.
  *
- * Total dedupKeys = N * itemsPerGroup — useful for constructing payloads
- * that span multiple 250-item trash batches.
+ * Total dedupKeys = N * (itemsPerGroup - 1) after one keep item per group
+ * — useful for constructing payloads that span multiple 25-item trash batches.
  */
 export function makeGroups(
   groupCount: number,
@@ -283,35 +359,16 @@ export function makeGroups(
         resWidth: 1920,
         resHeight: 1080,
         fileName: `photo-${key}.jpg`,
-        isOwned: true,
+        isOwned: true
       }
     }
     groups.push({
       id: `group-${g}`,
       mediaKeys,
       originalMediaKey: mediaKeys[0],
-      similarity: 0.95,
+      similarity: 0.95
     })
   }
 
   return { groups, mediaItems }
-}
-
-// ============================================================
-// Google Photos auth (full E2E only)
-// ============================================================
-
-function loadGpCookies() {
-  if (process.env.GP_AUTH_COOKIES) {
-    return JSON.parse(Buffer.from(process.env.GP_AUTH_COOKIES, "base64").toString("utf-8"))
-  }
-  const authFile = path.resolve(__dirname, "../../../.gp-auth.json")
-  if (fs.existsSync(authFile)) {
-    return JSON.parse(fs.readFileSync(authFile, "utf-8"))
-  }
-  throw new Error(
-    "No GP auth cookies found.\n" +
-    "  Local dev: run `npm run auth:export` to generate .gp-auth.json\n" +
-    "  CI: set the GP_AUTH_COOKIES secret (see scripts/auth-export.mjs)"
-  )
 }

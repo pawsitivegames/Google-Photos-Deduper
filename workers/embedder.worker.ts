@@ -8,6 +8,7 @@
 //   { type: "init", data: { wasmLoaderUrl, wasmBinaryUrl, modelBuffer: ArrayBuffer } }
 //   { type: "embed", data: { items: Array<{ localIdx: number, blob: Blob }> } }
 //   { type: "detect", data: { flatEmbeddings: Float32Array, n: number, dim: number, threshold: number } }
+//   { type: "detectBlock", data: { flatA: Float32Array, rowsA: number, offsetA: number, flatB: Float32Array, rowsB: number, offsetB: number, dim: number, threshold: number, sameBlock: boolean } }
 //   { type: "detectSmart", data: { flatEmbeddings: Float32Array, n: number, dim: number, threshold: number, buckets: number[][] } }
 //
 // Message protocol (worker → main):
@@ -15,7 +16,9 @@
 //   { type: "results", results: Array<{ localIdx: number, embedding: ArrayBuffer }> }
 //   { type: "initError", message: string }
 //   { type: "detectionProgress", current: number, total: number }
+//   { type: "partialDetectionResults", groups: number[][] }
 //   { type: "detectionResults", groups: number[][] }
+//   { type: "blockResults", pairs: Array<[number, number]> }
 
 import { ImageEmbedder } from "@mediapipe/tasks-vision";
 
@@ -115,13 +118,53 @@ self.addEventListener("message", async (event: MessageEvent) => {
     self.postMessage({ type: "detectionResults", groups });
   }
 
+  if (type === "detectBlock") {
+    const {
+      flatA,
+      rowsA,
+      offsetA,
+      flatB,
+      rowsB,
+      offsetB,
+      dim,
+      threshold,
+      sameBlock,
+    } = data as {
+      flatA: Float32Array;
+      rowsA: number;
+      offsetA: number;
+      flatB: Float32Array;
+      rowsB: number;
+      offsetB: number;
+      dim: number;
+      threshold: number;
+      sameBlock: boolean;
+    };
+
+    const pairs: Array<[number, number]> = [];
+    for (let i = 0; i < rowsA; i++) {
+      const startJ = sameBlock ? i + 1 : 0;
+      for (let j = startJ; j < rowsB; j++) {
+        let dot = 0;
+        const aBase = i * dim;
+        const bBase = j * dim;
+        for (let k = 0; k < dim; k++) dot += flatA[aBase + k] * flatB[bBase + k];
+        if (dot >= threshold) pairs.push([offsetA + i, offsetB + j]);
+      }
+    }
+
+    self.postMessage({ type: "blockResults", pairs });
+  }
+
   if (type === "detectSmart") {
-    const { flatEmbeddings, n, dim, threshold, buckets } = data as {
+    const { flatEmbeddings, n, dim, threshold, buckets, timestamps, windowMs } = data as {
       flatEmbeddings: Float32Array;
       n: number;
       dim: number;
       threshold: number;
       buckets: number[][];
+      timestamps?: number[];
+      windowMs?: number;
     };
 
     // Unpack flat buffer into row views (zero-copy)
@@ -130,6 +173,7 @@ self.addEventListener("message", async (event: MessageEvent) => {
       embeddings.push(flatEmbeddings.subarray(i * dim, (i + 1) * dim));
 
     const allGroups: number[][] = [];
+    let lastPartialGroupCount = 0;
     for (let bi = 0; bi < buckets.length; bi++) {
       const bucket = buckets[bi];
       // Union-Find over bucket indices
@@ -142,6 +186,14 @@ self.addEventListener("message", async (event: MessageEvent) => {
 
       for (let i = 0; i < bucket.length; i++) {
         for (let j = i + 1; j < bucket.length; j++) {
+          if (
+            timestamps &&
+            Number.isFinite(windowMs) &&
+            windowMs! > 0 &&
+            Math.abs(timestamps[bucket[i]] - timestamps[bucket[j]]) > windowMs!
+          ) {
+            continue;
+          }
           const a = embeddings[bucket[i]];
           const b = embeddings[bucket[j]];
           let dot = 0;
@@ -159,7 +211,13 @@ self.addEventListener("message", async (event: MessageEvent) => {
       for (const [, members] of components)
         if (members.length >= 2) allGroups.push(members);
 
-      if (bi % 100 === 0)
+      const shouldReportProgress = bi % 100 === 0 || bi === buckets.length - 1;
+      if (shouldReportProgress && allGroups.length !== lastPartialGroupCount) {
+        lastPartialGroupCount = allGroups.length;
+        self.postMessage({ type: "partialDetectionResults", groups: allGroups });
+      }
+
+      if (shouldReportProgress)
         self.postMessage({ type: "detectionProgress", current: bi + 1, total: buckets.length });
     }
 

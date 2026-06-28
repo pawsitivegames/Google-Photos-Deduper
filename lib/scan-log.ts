@@ -30,7 +30,12 @@ export interface PhaseTimings {
   communityDetectionMs?: number
 }
 
-export type ScanStatus = "complete" | "cancelled" | "error" | "killed_by_reload"
+export type ScanStatus =
+  | "complete"
+  | "cancelled"
+  | "paused"
+  | "error"
+  | "killed_by_reload"
 
 export interface ScanLogEntry {
   timestamp: number

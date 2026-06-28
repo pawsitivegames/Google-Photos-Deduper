@@ -5,10 +5,12 @@
  * the time-window ToggleButtonGroup, which is only shown in smart mode and
  * drives `onSettingsChange({ smartWindowSec })`.
  */
-import { describe, it, expect, vi } from "vitest"
-import { render, screen, fireEvent } from "@testing-library/react"
-import { ThemeProvider, createTheme } from "@mui/material/styles"
+import { createTheme, ThemeProvider } from "@mui/material/styles"
+import { fireEvent, render, screen } from "@testing-library/react"
+import { describe, expect, it, vi } from "vitest"
+
 import { ScanConfig } from "../../components/ScanConfig"
+import { createScanCheckpoint } from "../../lib/scan-checkpoint"
 import type { ScanSettings } from "../../lib/types"
 
 // ============================================================
@@ -19,23 +21,42 @@ const theme = createTheme()
 
 function renderConfig(settings: Partial<ScanSettings> = {}) {
   const onSettingsChange = vi.fn()
+  const onStartScan = vi.fn()
   const full: ScanSettings = {
     similarityThreshold: 0.99,
     scanMode: "smart",
     smartWindowSec: 1,
-    ...settings,
+    ...settings
   }
   render(
     <ThemeProvider theme={theme}>
       <ScanConfig
         settings={full}
         onSettingsChange={onSettingsChange}
-        onStartScan={vi.fn()}
+        onStartScan={onStartScan}
+        onClearCache={vi.fn()}
+        onRebuildCache={vi.fn()}
+        onExportCacheDiagnostics={vi.fn()}
         hasGptk={true}
+        cacheEntryCount={12}
+        albums={[
+          {
+            mediaKey: "album-1",
+            title: "Tiny test album",
+            itemCount: 3,
+            isShared: false
+          },
+          {
+            mediaKey: "album-2",
+            title: "Shared album",
+            itemCount: 12,
+            isShared: true
+          }
+        ]}
       />
     </ThemeProvider>
   )
-  return { onSettingsChange }
+  return { onSettingsChange, onStartScan }
 }
 
 // ============================================================
@@ -54,7 +75,7 @@ describe("ScanConfig — time window label (formatWindow)", () => {
     [86400, "1d"],
     [172800, "2d"],
     [604800, "1w"],
-    [1209600, "2w"],
+    [1209600, "2w"]
   ]
 
   for (const [sec, label] of cases) {
@@ -68,7 +89,9 @@ describe("ScanConfig — time window label (formatWindow)", () => {
 
   it("falls back to 1s when smartWindowSec is undefined", () => {
     renderConfig({ smartWindowSec: undefined })
-    expect(screen.getByText(/Time window:/)).toHaveTextContent("Time window: 1s")
+    expect(screen.getByText(/Time window:/)).toHaveTextContent(
+      "Time window: 1s"
+    )
   })
 })
 
@@ -94,5 +117,224 @@ describe("ScanConfig — time window toggle", () => {
   it("does not render the time window control in full-scan mode", () => {
     renderConfig({ scanMode: "full" })
     expect(screen.queryByText(/Time window:/)).not.toBeInTheDocument()
+  })
+})
+
+describe("ScanConfig — taken date range", () => {
+  it("emits date range updates from the date inputs", () => {
+    const { onSettingsChange } = renderConfig()
+
+    fireEvent.change(screen.getByLabelText("From"), {
+      target: { value: "2024-01-01" }
+    })
+    expect(onSettingsChange).toHaveBeenCalledWith({
+      dateRange: { from: "2024-01-01" }
+    })
+
+    fireEvent.change(screen.getByLabelText("To"), {
+      target: { value: "2024-12-31" }
+    })
+    expect(onSettingsChange).toHaveBeenCalledWith({
+      dateRange: { to: "2024-12-31" }
+    })
+  })
+
+  it("labels the primary button as a date range scan when scoped", () => {
+    renderConfig({ dateRange: { from: "2024-01-01", to: "2024-12-31" } })
+    expect(
+      screen.getByRole("button", { name: /Scan Date Range/i })
+    ).toBeInTheDocument()
+  })
+
+  it("blocks scanning when the date range is inverted", () => {
+    const { onStartScan } = renderConfig({
+      dateRange: { from: "2025-01-01", to: "2024-01-01" }
+    })
+
+    const button = screen.getByRole("button", { name: /Scan Date Range/i })
+    expect(button).toBeDisabled()
+    expect(screen.getByText(/start date must be before/i)).toBeInTheDocument()
+
+    fireEvent.click(button)
+    expect(onStartScan).not.toHaveBeenCalled()
+  })
+})
+
+describe("ScanConfig — large-library scan warning", () => {
+  it("warns before an unscoped full-library comparison", () => {
+    renderConfig({ scanMode: "full" })
+
+    expect(
+      screen.getByText(/Full-library comparison can be slow and memory-heavy/i)
+    ).toBeInTheDocument()
+  })
+
+  it("does not warn when full scan is scoped to a date range", () => {
+    renderConfig({
+      scanMode: "full",
+      dateRange: { from: "2024-01-01", to: "2024-12-31" }
+    })
+
+    expect(
+      screen.queryByText(
+        /Full-library comparison can be slow and memory-heavy/i
+      )
+    ).not.toBeInTheDocument()
+  })
+
+  it("does not warn when full scan is scoped to an album", () => {
+    renderConfig({
+      scanMode: "full",
+      albumScope: {
+        mediaKey: "album-1",
+        title: "Tiny test album",
+        itemCount: 3
+      }
+    })
+
+    expect(
+      screen.queryByText(
+        /Full-library comparison can be slow and memory-heavy/i
+      )
+    ).not.toBeInTheDocument()
+  })
+})
+
+describe("ScanConfig — similarity threshold guidance", () => {
+  it("explains that lower thresholds catch more reuploads", () => {
+    renderConfig({ scanMode: "full", similarityThreshold: 0.95 })
+    fireEvent.click(screen.getByRole("button", { name: /More options/i }))
+
+    expect(
+      screen.getByText(/Lower values catch more reuploads and edited copies/i)
+    ).toBeInTheDocument()
+    expect(screen.getByText(/Stricter/i)).toBeInTheDocument()
+  })
+})
+
+describe("ScanConfig — album scope", () => {
+  it("shows album count and emits the selected album scope", () => {
+    const { onSettingsChange } = renderConfig()
+
+    fireEvent.click(screen.getByRole("button", { name: /More options/i }))
+    expect(screen.getByText(/2 albums available/i)).toBeInTheDocument()
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: /Album/i }))
+    fireEvent.click(screen.getByRole("option", { name: /Tiny test album/i }))
+
+    expect(onSettingsChange).toHaveBeenCalledWith({
+      albumScope: {
+        mediaKey: "album-1",
+        title: "Tiny test album",
+        itemCount: 3,
+        isShared: false
+      }
+    })
+  })
+
+  it("labels the primary button as an album scan when album-scoped", () => {
+    renderConfig({
+      albumScope: {
+        mediaKey: "album-1",
+        title: "Tiny test album",
+        itemCount: 3
+      }
+    })
+
+    expect(
+      screen.getByRole("button", { name: /Scan Album/i })
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText(/Scanning only Tiny test album/i)
+    ).toBeInTheDocument()
+  })
+})
+
+describe("ScanConfig — embedding cache controls", () => {
+  it("shows cache size and emits cache actions", () => {
+    const onClearCache = vi.fn()
+    const onRebuildCache = vi.fn()
+    const onExportCacheDiagnostics = vi.fn()
+    const full: ScanSettings = {
+      similarityThreshold: 0.99,
+      scanMode: "smart",
+      smartWindowSec: 1
+    }
+
+    render(
+      <ThemeProvider theme={theme}>
+        <ScanConfig
+          settings={full}
+          onSettingsChange={vi.fn()}
+          onStartScan={vi.fn()}
+          onClearCache={onClearCache}
+          onRebuildCache={onRebuildCache}
+          onExportCacheDiagnostics={onExportCacheDiagnostics}
+          hasGptk={true}
+          cacheEntryCount={1234}
+        />
+      </ThemeProvider>
+    )
+
+    expect(screen.getByText(/1,234 cached embeddings/i)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: /More options/i }))
+    fireEvent.click(screen.getByRole("button", { name: /Clear Cache/i }))
+    fireEvent.click(screen.getByRole("button", { name: /Rebuild Cache/i }))
+    fireEvent.click(screen.getByRole("button", { name: /Export Diagnostics/i }))
+    expect(onClearCache).toHaveBeenCalledOnce()
+    expect(onRebuildCache).toHaveBeenCalledOnce()
+    expect(onExportCacheDiagnostics).toHaveBeenCalledOnce()
+  })
+})
+
+describe("ScanConfig — interrupted scan resume", () => {
+  it("shows the resumable checkpoint and emits resume/dismiss actions", () => {
+    const onResumeScan = vi.fn()
+    const onDismissResume = vi.fn()
+    const full: ScanSettings = {
+      similarityThreshold: 0.99,
+      scanMode: "smart",
+      smartWindowSec: 1
+    }
+    const checkpoint = createScanCheckpoint({
+      id: "req-1",
+      settings: {
+        ...full,
+        dateRange: { from: "2024-01-01", to: "2024-12-31" }
+      }
+    })
+
+    render(
+      <ThemeProvider theme={theme}>
+        <ScanConfig
+          settings={full}
+          onSettingsChange={vi.fn()}
+          onStartScan={vi.fn()}
+          onResumeScan={onResumeScan}
+          onDismissResume={onDismissResume}
+          onClearCache={vi.fn()}
+          onRebuildCache={vi.fn()}
+          onExportCacheDiagnostics={vi.fn()}
+          hasGptk={true}
+          cacheEntryCount={12}
+          resumeCheckpoint={{
+            ...checkpoint,
+            status: "interrupted",
+            phase: "computing_embeddings"
+          }}
+        />
+      </ThemeProvider>
+    )
+
+    expect(screen.getByText(/Previous smart scan/i)).toHaveTextContent(
+      "2024-01-01 to 2024-12-31"
+    )
+    expect(
+      screen.getByText(/completed work will be reused/i)
+    ).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole("button", { name: /Resume Scan/i }))
+    fireEvent.click(screen.getByRole("button", { name: /Dismiss/i }))
+    expect(onResumeScan).toHaveBeenCalledOnce()
+    expect(onDismissResume).toHaveBeenCalledOnce()
   })
 })

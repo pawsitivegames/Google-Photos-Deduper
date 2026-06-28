@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest"
 import { appReducer } from "../../lib/app-reducer"
 import type { AppState } from "../../lib/app-reducer"
 import type { GpdMediaItem, DuplicateGroup } from "../../lib/types"
-import { APP_ID } from "../../lib/types"
+import { APP_ID, DEFAULT_SETTINGS } from "../../lib/types"
 
 // ============================================================
 // Fixtures
@@ -63,6 +63,16 @@ const trashingState: AppState = {
 // ============================================================
 // HEALTH_CHECK_RESULT
 // ============================================================
+
+describe("DEFAULT_SETTINGS", () => {
+  it("uses a balanced similarity threshold that catches reuploads", () => {
+    expect(DEFAULT_SETTINGS.similarityThreshold).toBe(0.95)
+  })
+
+  it("uses full scan by default so cross-date reuploads are compared", () => {
+    expect(DEFAULT_SETTINGS.scanMode).toBe("full")
+  })
+})
 
 describe("HEALTH_CHECK_RESULT", () => {
   it("moves to connected when GP is reachable", () => {
@@ -150,13 +160,52 @@ describe("SCAN_COMPLETE", () => {
   it("sets results with correct totalItems count", () => {
     const next = appReducer(
       { status: "scanning", phase: "fetching", itemsProcessed: 0, totalEstimate: 0, message: "", requestId: "r", hasGptk: true },
-      { type: "SCAN_COMPLETE", mediaItems, groups }
+      { type: "SCAN_COMPLETE", mediaItems, groups, totalItems: 4 }
     )
     expect(next).toMatchObject({
       status: "results",
       totalItems: 4,
       groups,
     })
+  })
+})
+
+describe("SCAN_PARTIAL_RESULTS", () => {
+  it("stores provisional groups while a scan is running", () => {
+    const scanning: AppState = {
+      status: "scanning",
+      phase: "detecting_duplicates",
+      itemsProcessed: 1,
+      totalEstimate: 3,
+      message: "detecting_duplicates: 1/3",
+      requestId: "req-1",
+      hasGptk: true
+    }
+
+    const next = appReducer(scanning, {
+      type: "SCAN_PARTIAL_RESULTS",
+      mediaItems,
+      groups,
+      totalItems: 4
+    })
+
+    expect(next).toMatchObject({
+      status: "scanning",
+      partialMediaItems: mediaItems,
+      partialGroups: groups,
+      partialTotalItems: 4
+    })
+  })
+
+  it("ignores provisional groups outside an active scan", () => {
+    const next = appReducer(resultsState, {
+      type: "SCAN_PARTIAL_RESULTS",
+      mediaItems,
+      groups,
+      totalItems: 4
+    })
+
+    expect(next).toBe(resultsState)
   })
 })
 

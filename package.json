@@ -8,6 +8,7 @@
     "build:gptk": "git submodule update --init && (test -d Google-Photos-Toolkit/node_modules || npm --prefix Google-Photos-Toolkit install --no-fund --no-audit) && cd Google-Photos-Toolkit && npm run build && cp google_photos_toolkit.user.js ../scripts/google-photos-toolkit.user.js",
     "copy:wasm": "cp node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.js scripts/ && cp node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.wasm scripts/",
     "build:worker": "node_modules/.bin/esbuild workers/embedder.worker.ts --bundle --platform=browser --format=iife --target=es2020 --outfile=scripts/embedder-worker.js",
+    "typecheck": "tsc --noEmit --project tsconfig.json",
     "test": "vitest run",
     "test:bench": "vitest bench --run",
     "test:watch": "vitest",
@@ -68,8 +69,7 @@
       "https://photos.google.com/*",
       "https://*.googleusercontent.com/*",
       "https://*.usercontent.google.com/*",
-      "https://*.googleapis.com/*",
-      "https://cdn.jsdelivr.net/*"
+      "https://*.googleapis.com/*"
     ],
     "content_security_policy": {
       "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
@@ -82,7 +82,8 @@
           "scripts/google-photos-commands.js",
           "scripts/vision_wasm_internal.js",
           "scripts/vision_wasm_internal.wasm",
-          "scripts/embedder-worker.js"
+          "scripts/embedder-worker.js",
+          "scripts/mobilenet_v3_large.tflite"
         ],
         "matches": [
           "https://photos.google.com/*"

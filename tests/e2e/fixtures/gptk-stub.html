@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!doctype html>
 <!--
   GPTK Stub Page
   ==============
@@ -17,6 +17,7 @@
 
   Supported commands:
     healthCheck     → { hasGptk, hasWizData, accountEmail }
+    listAlbums       → small album list for scan-scope tests
     getAllMediaItems → []   (empty; scan tests use injected storage)
     trashItems      → emits per-chunk gptkProgress + final gptkResult
     restoreItems    → immediate gptkResult success
@@ -25,133 +26,175 @@
     window.__gptkOverrides = { trashItems: { success: false, error: "..." } }
 -->
 <html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <title>Google Photos (stub)</title>
-</head>
-<body>
-  <p>Google Photos stub — integration test fixture</p>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Google Photos (stub)</title>
+  </head>
+  <body>
+    <p>Google Photos stub — integration test fixture</p>
 
-  <script>
-    const APP_ID = "GPD"
-    const BATCH_SIZE = 250
+    <script>
+      const APP_ID = "GPD"
+      const TRASH_BATCH_SIZE = 25
 
-    /**
-     * Per-command response overrides. Tests can inject:
-     *   await page.evaluate(() => {
-     *     window.__gptkOverrides = { trashItems: { success: false, error: "HTTP 504" } }
-     *   })
-     */
-    window.__gptkOverrides = window.__gptkOverrides || {}
+      /**
+       * Per-command response overrides. Tests can inject:
+       *   await page.evaluate(() => {
+       *     window.__gptkOverrides = { trashItems: { success: false, error: "HTTP 504" } }
+       *   })
+       */
+      window.__gptkOverrides = window.__gptkOverrides || {}
+      window.__gptkCommandLog = window.__gptkCommandLog || []
 
-    /**
-     * Default programmed responses per command.
-     * These match the real GPTK response shapes captured from the live extension.
-     */
-    const DEFAULT_RESPONSES = {
-      healthCheck: {
-        hasGptk: true,
-        hasWizData: true,
-        accountEmail: "test@example.com",
-      },
-      getAllMediaItems: [],
-    }
-
-    function reply(command, requestId, data) {
-      window.postMessage({
-        app: APP_ID,
-        action: "gptkResult",
-        command,
-        requestId,
-        success: true,
-        data,
-      })
-    }
-
-    function replyError(command, requestId, error) {
-      window.postMessage({
-        app: APP_ID,
-        action: "gptkResult",
-        command,
-        requestId,
-        success: false,
-        error,
-      })
-    }
-
-    function progress(command, requestId, itemsProcessed) {
-      window.postMessage({
-        app: APP_ID,
-        action: "gptkProgress",
-        command,
-        requestId,
-        itemsProcessed,
-      })
-    }
-
-    async function handleTrashItems(command, requestId, args) {
-      const override = window.__gptkOverrides[command]
-      if (override && override.success === false) {
-        replyError(command, requestId, override.error || "Stub: trashItems failed")
-        return
+      /**
+       * Default programmed responses per command.
+       * These match the real GPTK response shapes captured from the live extension.
+       */
+      const DEFAULT_RESPONSES = {
+        healthCheck: {
+          hasGptk: true,
+          hasWizData: true,
+          accountEmail: "test@example.com"
+        },
+        listAlbums: [
+          {
+            mediaKey: "album-1",
+            title: "Tiny test album",
+            itemCount: 3,
+            isShared: false
+          },
+          {
+            mediaKey: "album-2",
+            title: "Shared album",
+            itemCount: 12,
+            isShared: true
+          }
+        ],
+        getAllMediaItems: []
       }
 
-      const dedupKeys = (args && args.dedupKeys) || []
-      const mediaKeysToTrash = (args && args.mediaKeysToTrash) || dedupKeys
-
-      // Emit one gptkProgress per completed batch (mirroring real GPTK behaviour)
-      for (let i = BATCH_SIZE; i < dedupKeys.length; i += BATCH_SIZE) {
-        progress(command, requestId, Math.min(i, dedupKeys.length))
-        // Yield to allow the bridge to relay before the next iteration
-        await new Promise((r) => setTimeout(r, 0))
+      function reply(command, requestId, data) {
+        window.postMessage({
+          app: APP_ID,
+          action: "gptkResult",
+          command,
+          requestId,
+          success: true,
+          data
+        })
       }
 
-      // Final progress (full count) + result
-      progress(command, requestId, dedupKeys.length)
-      reply(command, requestId, {
-        trashedCount: dedupKeys.length,
-        trashedKeys: mediaKeysToTrash,
-      })
-    }
-
-    async function handleRestoreItems(command, requestId, args) {
-      const override = window.__gptkOverrides[command]
-      if (override && override.success === false) {
-        replyError(command, requestId, override.error || "Stub: restoreItems failed")
-        return
+      function replyError(command, requestId, error, data) {
+        window.postMessage({
+          app: APP_ID,
+          action: "gptkResult",
+          command,
+          requestId,
+          success: false,
+          error,
+          ...(data !== undefined ? { data } : {})
+        })
       }
-      reply(command, requestId, {})
-    }
 
-    window.addEventListener("message", async (event) => {
-      if (event.source !== window) return
-      const msg = event.data
-      if (!msg || msg.app !== APP_ID || msg.action !== "gptkCommand") return
+      function progress(command, requestId, itemsProcessed) {
+        window.postMessage({
+          app: APP_ID,
+          action: "gptkProgress",
+          command,
+          requestId,
+          itemsProcessed
+        })
+      }
 
-      const { command, requestId, args } = msg
+      async function handleTrashItems(command, requestId, args) {
+        const override = window.__gptkOverrides[command]
+        if (override && override.success === false) {
+          replyError(
+            command,
+            requestId,
+            override.error || "Stub: trashItems failed",
+            override.data
+          )
+          return
+        }
 
-      switch (command) {
-        case "trashItems":
-          await handleTrashItems(command, requestId, args)
-          break
+        const dedupKeys = (args && args.dedupKeys) || []
+        const mediaKeysToTrash = (args && args.mediaKeysToTrash) || dedupKeys
+        const requestedBatchSize = Number(args && args.batchSize)
+        const batchSize =
+          Number.isFinite(requestedBatchSize) && requestedBatchSize > 0
+            ? Math.min(Math.floor(requestedBatchSize), TRASH_BATCH_SIZE)
+            : TRASH_BATCH_SIZE
 
-        case "restoreItems":
-          await handleRestoreItems(command, requestId, args)
-          break
+        // Emit one gptkProgress per completed batch (mirroring real GPTK behaviour)
+        for (let i = batchSize; i < dedupKeys.length; i += batchSize) {
+          progress(command, requestId, Math.min(i, dedupKeys.length))
+          // Yield to allow the bridge to relay before the next iteration
+          await new Promise((r) => setTimeout(r, 0))
+        }
 
-        default: {
-          const override = window.__gptkOverrides[command]
-          if (override && override.success === false) {
-            replyError(command, requestId, override.error || `Stub: ${command} failed`)
-          } else {
-            const data = (override && override.data) || DEFAULT_RESPONSES[command] || null
-            reply(command, requestId, data)
+        // Final progress (full count) + result
+        progress(command, requestId, dedupKeys.length)
+        reply(command, requestId, {
+          trashedCount: dedupKeys.length,
+          trashedKeys: mediaKeysToTrash,
+          trashedDedupKeys: dedupKeys,
+          retryAttempts: 0
+        })
+      }
+
+      async function handleRestoreItems(command, requestId, args) {
+        const override = window.__gptkOverrides[command]
+        if (override && override.success === false) {
+          replyError(
+            command,
+            requestId,
+            override.error || "Stub: restoreItems failed"
+          )
+          return
+        }
+        reply(command, requestId, {})
+      }
+
+      window.addEventListener("message", async (event) => {
+        if (event.source !== window) return
+        const msg = event.data
+        if (!msg || msg.app !== APP_ID || msg.action !== "gptkCommand") return
+
+        const { command, requestId, args } = msg
+        window.__gptkCommandLog.push({ command, requestId, args })
+
+        switch (command) {
+          case "trashItems":
+            await handleTrashItems(command, requestId, args)
+            break
+
+          case "restoreItems":
+            await handleRestoreItems(command, requestId, args)
+            break
+
+          default: {
+            const override = window.__gptkOverrides[command]
+            if (override && override.success === false) {
+              replyError(
+                command,
+                requestId,
+                override.error || `Stub: ${command} failed`
+              )
+            } else {
+              const data =
+                (override && override.data) ||
+                DEFAULT_RESPONSES[command] ||
+                null
+              reply(command, requestId, data)
+            }
           }
         }
-      }
-    })
+      })
 
-    console.log("[GPD stub] GPTK stub page loaded — ready for gptkCommand messages")
-  </script>
-</body>
+      console.log(
+        "[GPD stub] GPTK stub page loaded — ready for gptkCommand messages"
+      )
+    </script>
+  </body>
 </html>

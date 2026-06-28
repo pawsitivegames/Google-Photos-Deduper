@@ -27,6 +27,9 @@ export type AppState =
       requestId: string
       hasGptk: boolean
       accountEmail?: string
+      partialMediaItems?: Record<string, GpdMediaItem>
+      partialGroups?: DuplicateGroup[]
+      partialTotalItems?: number
     }
   | {
       status: "results"
@@ -51,9 +54,16 @@ export type AppAction =
   | { type: "SCAN_PROGRESS"; payload: GptkProgressMessage; phase?: ScanPhase; totalItems?: number }
   | { type: "SCAN_MEDIA_FETCHED"; mediaItems: GpdMediaItem[] }
   | {
+      type: "SCAN_PARTIAL_RESULTS"
+      mediaItems: Record<string, GpdMediaItem>
+      groups: DuplicateGroup[]
+      totalItems: number
+    }
+  | {
       type: "SCAN_COMPLETE"
       mediaItems: Record<string, GpdMediaItem>
       groups: DuplicateGroup[]
+      totalItems: number
     }
   | { type: "SCAN_ERROR"; error: string }
   | { type: "SCAN_CANCELLED" }
@@ -149,12 +159,21 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         message: `Fetched ${action.mediaItems.length} items. Downloading thumbnails...`,
       }
 
+    case "SCAN_PARTIAL_RESULTS":
+      if (state.status !== "scanning") return state
+      return {
+        ...state,
+        partialMediaItems: action.mediaItems,
+        partialGroups: action.groups,
+        partialTotalItems: action.totalItems,
+      }
+
     case "SCAN_COMPLETE":
       return {
         status: "results",
         mediaItems: action.mediaItems,
         groups: action.groups,
-        totalItems: Object.keys(action.mediaItems).length,
+        totalItems: action.totalItems,
         accountEmail: "accountEmail" in state ? state.accountEmail : undefined,
       }
 

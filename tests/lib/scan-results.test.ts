@@ -27,13 +27,13 @@ describe("areScanResultsValid", () => {
     ).toBe(false)
   })
 
-  it("returns true when stored email is undefined (legacy results without email)", () => {
+  it("returns false when stored email is undefined but the current account is known", () => {
     expect(
       areScanResultsValid(
         { accountEmail: undefined },
         { accountEmail: "user@example.com" }
       )
-    ).toBe(true)
+    ).toBe(false)
   })
 
   it("returns true when context email is undefined (health check did not return email)", () => {

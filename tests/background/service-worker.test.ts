@@ -109,6 +109,23 @@ describe("healthCheck", () => {
     )
   })
 
+  it("treats app tab id 0 as a valid sender tab", async () => {
+    const appTabId = 0
+
+    mockChrome.tabs.query.mockImplementation((query: { url?: string }) => {
+      if (query?.url?.includes("photos.google.com")) return Promise.resolve([])
+      return Promise.resolve([{ id: appTabId }])
+    })
+
+    dispatchMessage({ app: APP_ID, action: "healthCheck" }, appSender())
+    await new Promise((r) => setTimeout(r, 20))
+
+    expect(mockChrome.tabs.sendMessage).toHaveBeenCalledWith(
+      appTabId,
+      expect.objectContaining({ action: "healthCheck.result", success: false })
+    )
+  })
+
   it("forwards healthCheck command to GP tab when GP tab exists", async () => {
     const gpTabId = 10
     const appTabId = 20
@@ -258,6 +275,57 @@ describe("findGooglePhotosTab — multi-tab selection", () => {
     )
   })
 
+  it("treats Google Photos tab id 0 as a valid reachable tab", async () => {
+    const gpTabId = 0
+    const appTabId = 58
+
+    mockChrome.tabs.query.mockImplementation((query: { url?: string }) => {
+      if (query?.url?.includes("photos.google.com"))
+        return Promise.resolve([{ id: gpTabId, active: true, lastAccessed: 1 }])
+      return Promise.resolve([{ id: appTabId }])
+    })
+
+    mockChrome.tabs.sendMessage.mockImplementation(
+      (
+        _tabId: number,
+        msg: { action?: string; command?: string; requestId?: string }
+      ) => {
+        if (msg?.command === "healthCheck") {
+          setTimeout(() => {
+            dispatchMessage(
+              {
+                app: APP_ID,
+                action: "gptkResult",
+                command: "healthCheck",
+                requestId: msg.requestId,
+                success: true,
+                data: { hasGptk: true, hasWizData: true },
+              },
+              gpSender(gpTabId)
+            )
+          }, 0)
+        }
+        return Promise.resolve()
+      }
+    )
+
+    dispatchMessage({ app: APP_ID, action: "healthCheck" }, appSender())
+    await new Promise((r) => setTimeout(r, 30))
+
+    expect(mockChrome.tabs.sendMessage).toHaveBeenCalledWith(
+      gpTabId,
+      expect.objectContaining({ action: "ping" })
+    )
+    expect(mockChrome.tabs.sendMessage).toHaveBeenCalledWith(
+      gpTabId,
+      expect.objectContaining({ command: "healthCheck" })
+    )
+    expect(mockChrome.tabs.sendMessage).toHaveBeenCalledWith(
+      appTabId,
+      expect.objectContaining({ action: "healthCheck.result", success: true })
+    )
+  })
+
   it("reports failure when no Google Photos tab has the bridge loaded", async () => {
     const tabA = 51
     const tabB = 52
@@ -380,6 +448,99 @@ describe("gptkCommand routing", () => {
     expect(mockChrome.tabs.sendMessage).toHaveBeenCalledWith(
       appTabId,
       expect.objectContaining({ action: "gptkResult", success: false })
+    )
+  })
+
+  it("forwards commands from app tab id 0", async () => {
+    const appTabId = 0
+    const gpTabId = 61
+    const requestId = "test-req-zero-app"
+
+    mockChrome.tabs.query.mockImplementation((query: { url?: string }) => {
+      if (query?.url?.includes("photos.google.com"))
+        return Promise.resolve([{ id: gpTabId, active: true }])
+      return Promise.resolve([{ id: appTabId }])
+    })
+    mockChrome.tabs.sendMessage.mockImplementation(
+      (tabId: number, msg: { action?: string }) => {
+        if (msg?.action === "ping" && tabId !== gpTabId) {
+          return Promise.reject(new Error("stale mapping"))
+        }
+        return Promise.resolve()
+      }
+    )
+
+    dispatchMessage(
+      {
+        app: APP_ID,
+        action: "gptkCommand",
+        command: "getAllMediaItems",
+        requestId,
+        args: {},
+      },
+      appSender()
+    )
+    await new Promise((r) => setTimeout(r, 20))
+
+    expect(mockChrome.tabs.sendMessage).toHaveBeenCalledWith(
+      gpTabId,
+      expect.objectContaining({ command: "getAllMediaItems", requestId })
+    )
+  })
+
+  it("relays progress back to app tab id 0", async () => {
+    const appTabId = 0
+    const gpTabId = 62
+    const requestId = "test-req-zero-progress"
+
+    mockChrome.tabs.query.mockImplementation((query: { url?: string }) => {
+      if (query?.url?.includes("photos.google.com"))
+        return Promise.resolve([{ id: gpTabId, active: true }])
+      return Promise.resolve([{ id: appTabId }])
+    })
+    mockChrome.tabs.sendMessage.mockImplementation(
+      (tabId: number, msg: { action?: string }) => {
+        if (msg?.action === "ping" && tabId !== gpTabId) {
+          return Promise.reject(new Error("stale mapping"))
+        }
+        return Promise.resolve()
+      }
+    )
+
+    dispatchMessage(
+      {
+        app: APP_ID,
+        action: "gptkCommand",
+        command: "getAllMediaItems",
+        requestId,
+        args: {},
+      },
+      appSender()
+    )
+    await new Promise((r) => setTimeout(r, 20))
+
+    vi.clearAllMocks()
+    dispatchMessage(
+      {
+        app: APP_ID,
+        action: "gptkProgress",
+        command: "getAllMediaItems",
+        requestId,
+        itemsProcessed: 25,
+        message: "Fetched 25",
+      },
+      gpSender(gpTabId)
+    )
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(mockChrome.tabs.sendMessage).toHaveBeenCalledWith(
+      appTabId,
+      expect.objectContaining({
+        action: "gptkProgress",
+        command: "getAllMediaItems",
+        requestId,
+        itemsProcessed: 25,
+      })
     )
   })
 })

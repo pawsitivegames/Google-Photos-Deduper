@@ -18,9 +18,15 @@ const pendingCommands: Record<
   {
     resolve: (data: unknown) => void
     reject: (error: string) => void
-    appTabId: number
+    appTabId: number | null
   }
 > = {}
+
+function hasTabId(tab: Pick<chrome.tabs.Tab, "id">): tab is chrome.tabs.Tab & {
+  id: number
+} {
+  return tab.id !== undefined && tab.id !== null
+}
 
 // ============================================================
 // Find tabs
@@ -56,7 +62,7 @@ async function findGooglePhotosTab(): Promise<chrome.tabs.Tab | null> {
   })
 
   for (const candidate of sorted) {
-    if (!candidate.id) continue
+    if (!hasTabId(candidate)) continue
     try {
       await chrome.tabs.sendMessage(candidate.id, {
         app: APP_ID,
@@ -70,6 +76,25 @@ async function findGooglePhotosTab(): Promise<chrome.tabs.Tab | null> {
   return null
 }
 
+async function getReachableMappedGooglePhotosTabId(
+  senderTabId: number
+): Promise<number | null> {
+  const mappedTabId = tabMap[senderTabId]
+  if (mappedTabId === undefined) return null
+
+  try {
+    await chrome.tabs.sendMessage(mappedTabId, {
+      app: APP_ID,
+      action: "ping",
+    })
+    return mappedTabId
+  } catch {
+    delete tabMap[senderTabId]
+    delete tabMap[mappedTabId]
+    return null
+  }
+}
+
 /**
  * Get the sender's tab ID. For content scripts, sender.tab is set.
  * For extension pages (tabs/app.html), sender.tab is undefined —
@@ -78,12 +103,14 @@ async function findGooglePhotosTab(): Promise<chrome.tabs.Tab | null> {
 async function getSenderTabId(
   sender: chrome.runtime.MessageSender
 ): Promise<number | null> {
-  if (sender.tab?.id) return sender.tab.id
+  if (sender.tab?.id !== undefined && sender.tab.id !== null) {
+    return sender.tab.id
+  }
 
   // Extension page: find tab by URL
   if (sender.url) {
     const tabs = await chrome.tabs.query({ url: sender.url })
-    if (tabs.length > 0 && tabs[0].id) return tabs[0].id
+    if (tabs.length > 0 && hasTabId(tabs[0])) return tabs[0].id
   }
   return null
 }
@@ -112,7 +139,7 @@ async function sendGptkCommand(
   }
 
   return new Promise((resolve, reject) => {
-    pendingCommands[requestId] = { resolve, reject, appTabId: 0 }
+    pendingCommands[requestId] = { resolve, reject, appTabId: null }
     chrome.tabs.sendMessage(gpTabId, message).catch(() => {
       delete pendingCommands[requestId]
       reject(
@@ -160,7 +187,11 @@ async function handleLaunchApp(
   const appTab = await chrome.tabs.create({
     url: chrome.runtime.getURL("tabs/app.html"),
   })
-  if (sender.tab?.id && appTab.id) {
+  if (
+    sender.tab?.id !== undefined &&
+    sender.tab.id !== null &&
+    hasTabId(appTab)
+  ) {
     tabMap[sender.tab.id] = appTab.id
     tabMap[appTab.id] = sender.tab.id
   }
@@ -172,8 +203,8 @@ async function handleHealthCheck(
   const senderTabId = await getSenderTabId(sender)
 
   const gpTab = await findGooglePhotosTab()
-  if (!gpTab?.id) {
-    if (senderTabId) {
+  if (!gpTab || !hasTabId(gpTab)) {
+    if (senderTabId !== null) {
       chrome.tabs.sendMessage(senderTabId, {
         app: APP_ID,
         action: "healthCheck.result",
@@ -185,14 +216,14 @@ async function handleHealthCheck(
   }
 
   // Map the app tab to the GP tab
-  if (senderTabId && gpTab.id) {
+  if (senderTabId !== null) {
     tabMap[senderTabId] = gpTab.id
     tabMap[gpTab.id] = senderTabId
   }
 
   try {
     const result = await sendGptkCommand(gpTab.id, "healthCheck")
-    if (senderTabId) {
+    if (senderTabId !== null) {
       const r = result as { hasGptk: boolean; accountEmail?: string }
       chrome.tabs.sendMessage(senderTabId, {
         app: APP_ID,
@@ -203,7 +234,7 @@ async function handleHealthCheck(
       })
     }
   } catch {
-    if (senderTabId) {
+    if (senderTabId !== null) {
       chrome.tabs.sendMessage(senderTabId, {
         app: APP_ID,
         action: "healthCheck.result",
@@ -219,13 +250,13 @@ async function handleGptkCommand(
   sender: chrome.runtime.MessageSender
 ): Promise<void> {
   const senderTabId = await getSenderTabId(sender)
-  if (!senderTabId) return
+  if (senderTabId === null) return
 
   // Find the GP tab for this sender
-  let gpTabId = tabMap[senderTabId]
-  if (!gpTabId) {
+  let gpTabId = await getReachableMappedGooglePhotosTabId(senderTabId)
+  if (gpTabId === null) {
     const gpTab = await findGooglePhotosTab()
-    if (!gpTab?.id) {
+    if (!gpTab || !hasTabId(gpTab)) {
       chrome.tabs.sendMessage(senderTabId, {
         app: APP_ID,
         action: "gptkResult",
@@ -271,7 +302,7 @@ function handleGptkResult(
   if (!pending) return
 
   // Relay result to the app tab
-  if (pending.appTabId) {
+  if (pending.appTabId !== null) {
     chrome.tabs.sendMessage(pending.appTabId, message)
   }
 
@@ -290,7 +321,7 @@ function handleGptkProgress(
   _sender: chrome.runtime.MessageSender
 ): void {
   const pending = pendingCommands[message.requestId]
-  if (!pending?.appTabId) return
+  if (!pending || pending.appTabId === null) return
 
   // Relay progress to the app tab
   chrome.tabs.sendMessage(pending.appTabId, message)
@@ -302,7 +333,7 @@ function handleGptkProgress(
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   const mappedTabId = tabMap[tabId]
-  if (mappedTabId) {
+  if (mappedTabId !== undefined) {
     delete tabMap[mappedTabId]
 
     // If a GP tab closed, notify the app tab

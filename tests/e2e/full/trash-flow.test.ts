@@ -11,14 +11,44 @@
  *
  * Run: `npm run test:e2e`
  */
-import { test, expect } from "@playwright/test"
-import {
-  connectToChrome,
-} from "../fixtures/extension"
+import { expect, test, type Page } from "@playwright/test"
+
+import { connectToChrome } from "../fixtures/extension"
 
 test.setTimeout(600_000)
 
+async function expandMoreOptions(page: Page): Promise<void> {
+  const albumInput = page.getByRole("combobox", { name: /Album/i })
+  if (await albumInput.isVisible().catch(() => false)) return
+  await page.getByRole("button", { name: /More options/i }).click()
+}
+
+async function applyConfiguredScope(page: Page): Promise<void> {
+  const albumTitle = process.env.GPD_E2E_ALBUM_TITLE
+  const dateFrom = process.env.GPD_E2E_DATE_FROM
+  const dateTo = process.env.GPD_E2E_DATE_TO
+
+  await expandMoreOptions(page)
+
+  if (albumTitle) {
+    await page.getByRole("combobox", { name: /Album/i }).click()
+    await page
+      .getByRole("option", { name: new RegExp(albumTitle, "i") })
+      .click()
+    return
+  }
+
+  const today = new Date().toISOString().slice(0, 10)
+  await page.getByLabel("From").fill(dateFrom || today)
+  await page.getByLabel("To").fill(dateTo || today)
+}
+
 test("trashes duplicates via API and undoes via undo snackbar", async () => {
+  test.skip(
+    process.env.GPD_E2E_ALLOW_TRASH !== "1",
+    "Set GPD_E2E_ALLOW_TRASH=1 to run this live Trash validation."
+  )
+
   const { browser, context, extensionId } = await connectToChrome()
   const gpPage = await context.newPage()
   const appPage = await context.newPage()
@@ -28,13 +58,15 @@ test("trashes duplicates via API and undoes via undo snackbar", async () => {
     await gpPage.goto("https://photos.google.com")
     await gpPage.waitForLoadState("networkidle")
     await gpPage.waitForFunction(() => typeof window.gptkApi !== "undefined", {
-      timeout: 15_000,
+      timeout: 15_000
     })
 
     await appPage.goto(`chrome-extension://${extensionId}/tabs/app.html`)
 
     // Wait for the app to be ready — either fresh connected state or already showing results
-    const scanButton = appPage.getByRole("button", { name: /scan library/i })
+    const scanButton = appPage.getByRole("button", {
+      name: /Scan (Library|Album|Date Range)/i
+    })
     const rescanButton = appPage.getByRole("button", { name: /re-scan/i })
     const resultsHeading = appPage.getByText(/Duplicate Groups Found/)
 
@@ -46,12 +78,25 @@ test("trashes duplicates via API and undoes via undo snackbar", async () => {
     const hasSavedResults = await resultsHeading.isVisible()
     if (!hasSavedResults) {
       const isFresh = await scanButton.isVisible()
-      await (isFresh ? scanButton : rescanButton).click()
-      await expect(appPage.getByText(/items scanned/)).toBeVisible({ timeout: 300_000 })
+      if (!isFresh) {
+        await rescanButton.click()
+        await expect(scanButton).toBeVisible({ timeout: 15_000 })
+      }
+      await applyConfiguredScope(appPage)
+      await scanButton.click()
+      await expect(appPage.getByText(/items scanned/)).toBeVisible({
+        timeout: 300_000
+      })
     }
 
-    // Skip gracefully if no duplicates in this account
-    const trashButton = appPage.getByRole("button", { name: /Move .+ Duplicate/i })
+    // Keep the live test conservative: trash only the first visible duplicate group.
+    await appPage.getByRole("button", { name: /^Deselect All$/i }).click()
+    await appPage.locator('input[type="checkbox"]').first().check()
+
+    // Skip gracefully if no duplicates are selected in this account.
+    const trashButton = appPage.getByRole("button", {
+      name: /Move \d+ Duplicates? to Trash/i
+    })
     if (!(await trashButton.isEnabled())) {
       test.skip()
       return
@@ -61,12 +106,31 @@ test("trashes duplicates via API and undoes via undo snackbar", async () => {
     const groupCountEl = appPage.getByText(/\d+ duplicate groups?$/)
     const groupCountBefore = await groupCountEl.textContent()
 
-    // Confirm the dialog and trash
-    appPage.once("dialog", (dialog) => dialog.accept())
+    const trashButtonText = (await trashButton.textContent()) || ""
+    const countMatch = trashButtonText.match(/Move\s+(\d+)\s+Duplicate/i)
+    expect(
+      countMatch,
+      `Could not parse Trash count from "${trashButtonText}"`
+    ).toBeTruthy()
+    const trashCount = Number(countMatch![1])
+
+    // Confirm the dialog by typing the exact item count.
     await trashButton.click()
+    await expect(appPage.getByRole("dialog")).toBeVisible()
+    const confirmButton = appPage
+      .getByRole("button", { name: /^Move to Trash$/i })
+      .last()
+    await expect(confirmButton).toBeDisabled()
+    await appPage
+      .getByLabel(`Type ${trashCount} to confirm`)
+      .fill(String(trashCount))
+    await expect(confirmButton).toBeEnabled()
+    await confirmButton.click()
 
     // Undo snackbar should appear (API call succeeds)
-    await expect(appPage.getByText(/moved to trash/i)).toBeVisible({ timeout: 30_000 })
+    await expect(appPage.getByText(/moved to trash/i)).toBeVisible({
+      timeout: 30_000
+    })
 
     // Group count should have dropped
     const groupCountAfter = await groupCountEl.textContent()
@@ -76,7 +140,9 @@ test("trashes duplicates via API and undoes via undo snackbar", async () => {
     await appPage.getByRole("button", { name: /undo/i }).click()
 
     // State should restore to pre-trash group count
-    await expect(appPage.getByText(groupCountBefore!)).toBeVisible({ timeout: 30_000 })
+    await expect(appPage.getByText(groupCountBefore!)).toBeVisible({
+      timeout: 30_000
+    })
   } finally {
     await gpPage.close()
     await appPage.close()

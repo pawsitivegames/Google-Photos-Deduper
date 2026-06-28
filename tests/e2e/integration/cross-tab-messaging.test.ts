@@ -16,12 +16,13 @@
  *
  * Prerequisites: `npm run dev` (dev build) or `npm run build` (prod build)
  */
-import { test, expect, type BrowserContext, type Page } from "@playwright/test"
+import { expect, test, type BrowserContext, type Page } from "@playwright/test"
+
 import {
+  clearStorage,
   launchExtension,
   openAppTab,
-  openGptkStubPage,
-  clearStorage,
+  openGptkStubPage
 } from "../fixtures/extension"
 
 let context: BrowserContext
@@ -93,9 +94,9 @@ test.describe("healthCheck", () => {
         data: {
           hasGptk: true,
           hasWizData: true,
-          accountEmail: "custom@example.com",
-        },
-      } as never,
+          accountEmail: "custom@example.com"
+        }
+      } as never
     })
     const page = await openAppTab(context, extensionId)
 
@@ -173,7 +174,7 @@ test.describe("gptkCommand routing", () => {
             resolve({
               success: msg.success as boolean,
               command: msg.command as string,
-              data: msg.data,
+              data: msg.data
             })
           }
         }
@@ -183,7 +184,7 @@ test.describe("gptkCommand routing", () => {
           app: APP_ID,
           action: "gptkCommand",
           command: "healthCheck",
-          requestId,
+          requestId
         })
       })
     })
@@ -219,7 +220,10 @@ test.describe("gptkCommand routing", () => {
             msg?.requestId === requestId
           ) {
             chrome.runtime.onMessage.removeListener(listener)
-            resolve({ success: msg.success as boolean, error: msg.error as string })
+            resolve({
+              success: msg.success as boolean,
+              error: msg.error as string
+            })
           }
         }
         chrome.runtime.onMessage.addListener(listener)
@@ -228,7 +232,7 @@ test.describe("gptkCommand routing", () => {
           app: APP_ID,
           action: "gptkCommand",
           command: "healthCheck",
-          requestId,
+          requestId
         })
       })
     })
@@ -255,7 +259,7 @@ test.describe("progress streaming", () => {
       page.getByRole("button", { name: /Scan Library/i })
     ).toBeVisible({ timeout: 10_000 })
 
-    // Trigger a trashItems command with 600 items (2 batches of 250 + 100)
+    // Trigger a trashItems command with 60 items (2 batches of 25 + 10)
     // The stub emits progress after each batch, so we expect at least one progress event.
     const progressEvents = await page.evaluate(() => {
       return new Promise<number[]>((resolve) => {
@@ -275,29 +279,29 @@ test.describe("progress streaming", () => {
         }
         chrome.runtime.onMessage.addListener(listener)
 
-        const dedupKeys = Array.from({ length: 600 }, (_, i) => `key-${i}`)
+        const dedupKeys = Array.from({ length: 60 }, (_, i) => `key-${i}`)
         chrome.runtime.sendMessage({
           app: APP_ID,
           action: "gptkCommand",
           command: "trashItems",
           requestId,
-          args: { dedupKeys },
+          args: { dedupKeys, batchSize: 25 }
         })
       })
     })
 
-    // Expect at least 2 progress events (batch 250, batch 500, plus 600)
+    // Expect at least 2 progress events (batch 25, batch 50, plus 60)
     expect(progressEvents.length).toBeGreaterThanOrEqual(2)
-    // The stub emits 250, 500, then 600. Assert on the set of values rather
+    // The stub emits 25, 50, then 60. Assert on the set of values rather
     // than arrival order: chrome.runtime messaging does not guarantee ordered
     // delivery across the tab → background → tab relay, so events can arrive
     // out of order even though they're emitted monotonically.
     const seen = new Set(progressEvents)
-    expect(seen).toContain(250)
-    expect(seen).toContain(500)
-    expect(seen).toContain(600)
+    expect(seen).toContain(25)
+    expect(seen).toContain(50)
+    expect(seen).toContain(60)
     // Total reached: the highest progress value equals the item count.
-    expect(Math.max(...progressEvents)).toBe(600)
+    expect(Math.max(...progressEvents)).toBe(60)
 
     await stub.close()
     await page.close()

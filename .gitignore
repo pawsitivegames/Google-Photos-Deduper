@@ -44,4 +44,5 @@ docs/
 
 # Local Chrome Debug Profiles
 .chrome-profile/
-
+.chrome-live-validation/
+tmp-live-duplicate-test/

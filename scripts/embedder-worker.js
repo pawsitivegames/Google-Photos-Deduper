@@ -4065,12 +4065,38 @@
       );
       self.postMessage({ type: "detectionResults", groups });
     }
+    if (type === "detectBlock") {
+      const {
+        flatA,
+        rowsA,
+        offsetA,
+        flatB,
+        rowsB,
+        offsetB,
+        dim,
+        threshold,
+        sameBlock
+      } = data;
+      const pairs = [];
+      for (let i2 = 0; i2 < rowsA; i2++) {
+        const startJ = sameBlock ? i2 + 1 : 0;
+        for (let j2 = startJ; j2 < rowsB; j2++) {
+          let dot = 0;
+          const aBase = i2 * dim;
+          const bBase = j2 * dim;
+          for (let k2 = 0; k2 < dim; k2++) dot += flatA[aBase + k2] * flatB[bBase + k2];
+          if (dot >= threshold) pairs.push([offsetA + i2, offsetB + j2]);
+        }
+      }
+      self.postMessage({ type: "blockResults", pairs });
+    }
     if (type === "detectSmart") {
-      const { flatEmbeddings, n: n2, dim, threshold, buckets } = data;
+      const { flatEmbeddings, n: n2, dim, threshold, buckets, timestamps, windowMs } = data;
       const embeddings = [];
       for (let i2 = 0; i2 < n2; i2++)
         embeddings.push(flatEmbeddings.subarray(i2 * dim, (i2 + 1) * dim));
       const allGroups = [];
+      let lastPartialGroupCount = 0;
       for (let bi2 = 0; bi2 < buckets.length; bi2++) {
         const bucket = buckets[bi2];
         const parent = bucket.map((_2, j2) => j2);
@@ -4080,6 +4106,9 @@
         };
         for (let i2 = 0; i2 < bucket.length; i2++) {
           for (let j2 = i2 + 1; j2 < bucket.length; j2++) {
+            if (timestamps && Number.isFinite(windowMs) && windowMs > 0 && Math.abs(timestamps[bucket[i2]] - timestamps[bucket[j2]]) > windowMs) {
+              continue;
+            }
             const a2 = embeddings[bucket[i2]];
             const b2 = embeddings[bucket[j2]];
             let dot = 0;
@@ -4095,7 +4124,12 @@
         }
         for (const [, members] of components)
           if (members.length >= 2) allGroups.push(members);
-        if (bi2 % 100 === 0)
+        const shouldReportProgress = bi2 % 100 === 0 || bi2 === buckets.length - 1;
+        if (shouldReportProgress && allGroups.length !== lastPartialGroupCount) {
+          lastPartialGroupCount = allGroups.length;
+          self.postMessage({ type: "partialDetectionResults", groups: allGroups });
+        }
+        if (shouldReportProgress)
           self.postMessage({ type: "detectionProgress", current: bi2 + 1, total: buckets.length });
       }
       self.postMessage({ type: "detectionResults", groups: allGroups });

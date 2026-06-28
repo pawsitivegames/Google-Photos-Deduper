@@ -4,7 +4,6 @@ import AppBar from "@mui/material/AppBar"
 import Box from "@mui/material/Box"
 import Button from "@mui/material/Button"
 import CircularProgress from "@mui/material/CircularProgress"
-import LinearProgress from "@mui/material/LinearProgress"
 import CssBaseline from "@mui/material/CssBaseline"
 import Dialog from "@mui/material/Dialog"
 import DialogActions from "@mui/material/DialogActions"
@@ -12,33 +11,67 @@ import DialogContent from "@mui/material/DialogContent"
 import DialogContentText from "@mui/material/DialogContentText"
 import DialogTitle from "@mui/material/DialogTitle"
 import IconButton from "@mui/material/IconButton"
+import LinearProgress from "@mui/material/LinearProgress"
 import Snackbar from "@mui/material/Snackbar"
 import { ThemeProvider } from "@mui/material/styles"
+import TextField from "@mui/material/TextField"
 import Toolbar from "@mui/material/Toolbar"
 import Typography from "@mui/material/Typography"
 import confetti from "canvas-confetti"
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react"
+import {
+  type Dispatch,
+  type MutableRefObject,
+  type SetStateAction,
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState
+} from "react"
 
 import { ActionBar } from "../components/ActionBar"
+import type { ReviewFilter } from "../components/ActionBar"
 import { DuplicateGroups } from "../components/DuplicateGroups"
 import { ScanConfig } from "../components/ScanConfig"
 import { ScanProgress } from "../components/ScanProgress"
 import { appReducer } from "../lib/app-reducer"
 import type { AppAction, AppState } from "../lib/app-reducer"
+import { buildCacheDiagnosticsReport } from "../lib/cache-diagnostics"
 import { debug } from "../lib/debug"
+import { classifyDuplicateGroup } from "../lib/duplicate-classifier"
+import { buildDeleteReport, type DeleteReport } from "../lib/delete-report"
 import {
   fullDetectDuplicates,
+  selectDefaultKeep,
   smartDetectDuplicates
 } from "../lib/duplicate-detector"
 import type { DetectionProgress } from "../lib/duplicate-detector"
-import { selectDefaultKeep } from "../lib/duplicate-detector"
+import { EmbeddingCache } from "../lib/embedding-cache"
+import { chooseKeepKeyForGroup, type KeepStrategy } from "../lib/keep-strategy"
+import { buildReviewReport, reviewReportToCsv } from "../lib/review-report"
+import {
+  canResumeScanCheckpoint,
+  createScanCheckpoint,
+  MAX_CHECKPOINT_MEDIA_ITEMS,
+  SCAN_CHECKPOINT_KEY,
+  shouldOfferResume,
+  summarizeScanCheckpoint,
+  updateScanCheckpoint,
+  type ScanCheckpoint
+} from "../lib/scan-checkpoint"
 import { ScanLogger } from "../lib/scan-log"
-import theme from "../lib/theme"
-import { APP_ID, DEFAULT_SETTINGS } from "../lib/types"
 import { areScanResultsValid } from "../lib/scan-results"
+import theme from "../lib/theme"
+import {
+  buildTrashResultReport,
+  type TrashResultReport
+} from "../lib/trash-result-report"
+import { APP_ID, DEFAULT_SETTINGS } from "../lib/types"
 import type {
   AppMessage,
   DuplicateGroup,
+  GpdAlbum,
   GpdMediaItem,
   GptkProgressMessage,
   GptkResultMessage,
@@ -56,6 +89,12 @@ import type {
 // not finished loading yet, or because the MV3 service worker is still
 // spinning up from idle. Backoff: 400ms, 800ms, 1600ms, 3200ms (5 attempts).
 const HEALTH_CHECK_MAX_ATTEMPTS = 5
+const TRASH_BATCH_SIZE = 25
+const TRASH_BATCH_PAUSE_MS = 1000
+const TRASH_RETRY_COUNT = 2
+const TRASH_RETRY_BACKOFF_MS = 1000
+const DELETE_REPORTS_KEY = "deleteReports"
+const TRASH_RESULT_REPORTS_KEY = "trashResultReports"
 
 function generateRequestId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -63,6 +102,192 @@ function generateRequestId(): string {
 
 function sendToServiceWorker(message: AppMessage): void {
   chrome.runtime.sendMessage(message)
+}
+
+function activeDateRange(
+  dateRange: ScanSettings["dateRange"]
+): ScanSettings["dateRange"] | undefined {
+  if (!dateRange?.from && !dateRange?.to) return undefined
+  return dateRange
+}
+
+function activeAlbumScope(
+  albumScope: ScanSettings["albumScope"]
+): ScanSettings["albumScope"] | undefined {
+  return albumScope?.mediaKey ? albumScope : undefined
+}
+
+function fullScanSettingsPatch(
+  scanSettings: ScanSettings
+): Partial<ScanSettings> {
+  return {
+    similarityThreshold: scanSettings.similarityThreshold,
+    scanMode: scanSettings.scanMode,
+    smartWindowSec: scanSettings.smartWindowSec,
+    dateRange: scanSettings.dateRange,
+    albumScope: scanSettings.albumScope
+  }
+}
+
+function dateToUtcMs(value: string, endOfDay = false): number {
+  return Date.parse(`${value}T${endOfDay ? "23:59:59.999" : "00:00:00.000"}Z`)
+}
+
+function filterMediaItemsByDateRange(
+  items: GpdMediaItem[],
+  dateRange: ScanSettings["dateRange"]
+): GpdMediaItem[] {
+  const range = activeDateRange(dateRange)
+  if (!range) return items
+
+  const fromMs = range.from ? dateToUtcMs(range.from) : Number.NEGATIVE_INFINITY
+  const toMs = range.to ? dateToUtcMs(range.to, true) : Number.POSITIVE_INFINITY
+
+  return items.filter((item) => {
+    if (!Number.isFinite(item.timestamp)) return false
+    return item.timestamp >= fromMs && item.timestamp <= toMs
+  })
+}
+
+async function persistDeleteReport(report: DeleteReport): Promise<void> {
+  try {
+    const stored = await chrome.storage.local.get(DELETE_REPORTS_KEY)
+    const reports =
+      (stored[DELETE_REPORTS_KEY] as DeleteReport[] | undefined) ?? []
+    reports.push(report)
+    if (reports.length > 20) reports.splice(0, reports.length - 20)
+    await chrome.storage.local.set({ [DELETE_REPORTS_KEY]: reports })
+  } catch (error) {
+    console.warn("[GPD] failed to persist delete report", error)
+    throw error
+  }
+}
+
+function downloadDeleteReport(report: DeleteReport): void {
+  downloadTextFile({
+    filename: `${report.reportId}.json`,
+    contents: JSON.stringify(report, null, 2),
+    type: "application/json"
+  })
+}
+
+async function persistTrashResultReport(
+  report: TrashResultReport
+): Promise<void> {
+  try {
+    const stored = await chrome.storage.local.get(TRASH_RESULT_REPORTS_KEY)
+    const reports =
+      (stored[TRASH_RESULT_REPORTS_KEY] as TrashResultReport[] | undefined) ??
+      []
+    reports.push(report)
+    if (reports.length > 20) reports.splice(0, reports.length - 20)
+    await chrome.storage.local.set({ [TRASH_RESULT_REPORTS_KEY]: reports })
+  } catch (error) {
+    console.warn("[GPD] failed to persist trash result report", error)
+    throw error
+  }
+}
+
+function downloadTrashResultReport(report: TrashResultReport): void {
+  downloadTextFile({
+    filename: `${report.reportId}.json`,
+    contents: JSON.stringify(report, null, 2),
+    type: "application/json"
+  })
+}
+
+function downloadTextFile(params: {
+  filename: string
+  contents: string
+  type: string
+}): void {
+  const blob = new Blob([params.contents], { type: params.type })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement("a")
+  a.href = url
+  a.download = params.filename
+  a.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 0)
+}
+
+function normalizeStoredSettings(settings: ScanSettings): ScanSettings {
+  const isOldUntouchedDefault =
+    settings.scanMode === "smart" &&
+    settings.similarityThreshold === 0.99 &&
+    (settings.smartWindowSec ?? 1) === 1 &&
+    !activeDateRange(settings.dateRange) &&
+    !activeAlbumScope(settings.albumScope)
+
+  if (isOldUntouchedDefault) {
+    return DEFAULT_SETTINGS
+  }
+
+  return settings
+}
+
+async function persistScanCheckpoint(
+  checkpoint: ScanCheckpoint
+): Promise<void> {
+  await chrome.storage.local
+    .set({ [SCAN_CHECKPOINT_KEY]: checkpoint })
+    .catch(() => {})
+}
+
+async function clearScanCheckpoint(): Promise<void> {
+  await chrome.storage.local.remove(SCAN_CHECKPOINT_KEY).catch(() => {})
+}
+
+function clearResumeCheckpointState(params: {
+  checkpointRef: MutableRefObject<ScanCheckpoint | null>
+  setResumeCheckpoint: Dispatch<SetStateAction<ScanCheckpoint | null>>
+}): void {
+  params.checkpointRef.current = null
+  params.setResumeCheckpoint(null)
+  void clearScanCheckpoint()
+}
+
+type PendingSelections = {
+  selectedGroupIds: Set<string>
+  keptOverrides: Record<string, Set<string>>
+}
+
+function deserializeStoredSelections(value: unknown): PendingSelections | null {
+  if (!value || typeof value !== "object") return null
+  const raw = value as {
+    selectedGroupIds?: unknown
+    keptOverrides?: unknown
+  }
+  const selectedGroupIds = Array.isArray(raw.selectedGroupIds)
+    ? raw.selectedGroupIds.filter((id): id is string => typeof id === "string")
+    : []
+  const keptOverrides: Record<string, Set<string>> = {}
+  if (raw.keptOverrides && typeof raw.keptOverrides === "object") {
+    for (const [groupId, mediaKeys] of Object.entries(
+      raw.keptOverrides as Record<string, unknown>
+    )) {
+      if (!Array.isArray(mediaKeys)) continue
+      const validMediaKeys = mediaKeys.filter(
+        (key): key is string => typeof key === "string"
+      )
+      if (validMediaKeys.length > 0) {
+        keptOverrides[groupId] = new Set(validMediaKeys)
+      }
+    }
+  }
+  return {
+    selectedGroupIds: new Set(selectedGroupIds),
+    keptOverrides
+  }
+}
+
+type UndoData = {
+  dedupKeys: string[]
+  count: number
+  snapshot: {
+    mediaItems: Record<string, GpdMediaItem>
+    groups: DuplicateGroup[]
+    totalItems: number
+  }
 }
 
 // ============================================================
@@ -92,17 +317,21 @@ export default function App() {
     dedupKeys: string[]
     mediaKeysToTrash: string[]
   } | null>(null)
+  const [trashConfirmCount, setTrashConfirmCount] = useState("")
+  const [trashWarning, setTrashWarning] = useState<string | null>(null)
+  const [reportError, setReportError] = useState<string | null>(null)
+  const [cacheEntryCount, setCacheEntryCount] = useState<number | null>(null)
+  const [cacheStatus, setCacheStatus] = useState<string | undefined>()
+  const [cacheBusy, setCacheBusy] = useState(false)
+  const [resumeCheckpoint, setResumeCheckpoint] =
+    useState<ScanCheckpoint | null>(null)
+  const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("all")
+  const [albums, setAlbums] = useState<GpdAlbum[]>([])
+  const [albumsLoading, setAlbumsLoading] = useState(false)
+  const [albumsError, setAlbumsError] = useState<string | null>(null)
 
   // Undo trash state: stored after a successful trash operation
-  const [undoData, setUndoData] = useState<{
-    dedupKeys: string[]
-    count: number
-    snapshot: {
-      mediaItems: Record<string, GpdMediaItem>
-      groups: DuplicateGroup[]
-      totalItems: number
-    }
-  } | null>(null)
+  const [undoData, setUndoData] = useState<UndoData | null>(null)
 
   // Refs to capture pre-trash data for undo
   const preTrashSnapshotRef = useRef<{
@@ -111,6 +340,9 @@ export default function App() {
     totalItems: number
   } | null>(null)
   const pendingDedupKeysRef = useRef<string[] | null>(null)
+  const pendingMediaKeysToTrashRef = useRef<string[] | null>(null)
+  const pendingRestoreUndoRef = useRef<UndoData | null>(null)
+  const pendingRestoreRequestIdRef = useRef<string | null>(null)
 
   // AbortController for the current scan (cancelled on user request or new scan)
   const scanAbortRef = useRef<AbortController | null>(null)
@@ -124,35 +356,98 @@ export default function App() {
   // Tracks the requestId of the active scan so stale results from previous
   // scans killed by reload can be dropped (they arrive late from the GP tab)
   const currentScanRequestIdRef = useRef<string | null>(null)
+  const scanCheckpointRef = useRef<ScanCheckpoint | null>(null)
 
   // Counts failed healthCheck attempts during initial connect so we can retry
   // silently before showing a disconnected error.
   const healthCheckAttemptsRef = useRef(0)
+  const albumsRequestedForAccountRef = useRef<string | null>(null)
 
   // Holds selections loaded from storage; applied once when groups first load
-  const pendingSelectionsRef = useRef<{
-    selectedGroupIds: Set<string>
-    keptOverrides: Record<string, Set<string>>
-  } | null>(null)
+  const pendingSelectionsRef = useRef<PendingSelections | null>(null)
+
+  const refreshEmbeddingCacheCount = useCallback(async () => {
+    let cache: EmbeddingCache | null = null
+    try {
+      cache = await EmbeddingCache.open()
+      setCacheEntryCount(await cache.count())
+    } catch {
+      setCacheEntryCount(null)
+    } finally {
+      cache?.close()
+    }
+  }, [])
+
+  const requestAlbums = useCallback((accountEmail?: string) => {
+    const key = accountEmail || "__unknown__"
+    albumsRequestedForAccountRef.current = key
+    setAlbumsLoading(true)
+    setAlbumsError(null)
+    sendToServiceWorker({
+      app: APP_ID,
+      action: "gptkCommand",
+      command: "listAlbums",
+      requestId: generateRequestId()
+    })
+  }, [])
+
+  const saveTrashResultReport = useCallback((report: TrashResultReport) => {
+    try {
+      downloadTrashResultReport(report)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setReportError(`Could not download the trash result report: ${message}`)
+    }
+
+    void persistTrashResultReport(report).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error)
+      setReportError(`Could not save the trash result report: ${message}`)
+    })
+  }, [])
+
+  const patchScanCheckpoint = useCallback(
+    (patch: Parameters<typeof updateScanCheckpoint>[1]) => {
+      if (!scanCheckpointRef.current) return
+      const next = updateScanCheckpoint(scanCheckpointRef.current, patch)
+      scanCheckpointRef.current = next
+      void persistScanCheckpoint(next)
+    },
+    []
+  )
 
   // Sync selectedGroupIds when groups change (e.g. after scan or trash)
   const stateGroups =
     state.status === "results" || state.status === "trashing"
       ? state.groups
+      : state.status === "scanning"
+        ? (state.partialGroups ?? null)
       : null
   const groups = useMemo(() => stateGroups ?? [], [stateGroups])
+  const displayMediaItems =
+    state.status === "results" || state.status === "trashing"
+      ? state.mediaItems
+      : state.status === "scanning"
+        ? (state.partialMediaItems ?? {})
+        : {}
   useEffect(() => {
     if (pendingSelectionsRef.current) {
       const saved = pendingSelectionsRef.current
       pendingSelectionsRef.current = null
-      const validIds = new Set(groups.map((g) => g.id))
+      const validGroups = new Map(groups.map((group) => [group.id, group]))
       // Restore saved selection, filtered to groups that still exist
-      const next = new Set([...saved.selectedGroupIds].filter((id) => validIds.has(id)))
+      const next = new Set(
+        [...saved.selectedGroupIds].filter((id) => validGroups.has(id))
+      )
       setSelectedGroupIds(next)
-      // Restore kept overrides, filtered to valid groups
+      // Restore kept overrides, filtered to keys that still exist in the group.
+      // If every saved key is stale, fall back to the current default keep choice.
       const filteredKept: Record<string, Set<string>> = {}
       for (const [id, keys] of Object.entries(saved.keptOverrides)) {
-        if (validIds.has(id)) filteredKept[id] = keys
+        const group = validGroups.get(id)
+        if (!group) continue
+        const validKeys = new Set(group.mediaKeys)
+        const filteredKeys = [...keys].filter((key) => validKeys.has(key))
+        if (filteredKeys.length > 0) filteredKept[id] = new Set(filteredKeys)
       }
       setKeptOverrides(filteredKept)
     } else {
@@ -170,17 +465,12 @@ export default function App() {
     })
   }, [])
 
-  const handleSelectAll = useCallback(() => {
-    setSelectedGroupIds(new Set(groups.map((g) => g.id)))
-  }, [groups])
-
-  const handleDeselectAll = useCallback(() => {
-    setSelectedGroupIds(new Set())
-  }, [])
-
   // Listen for messages from service worker
   useEffect(() => {
-    const listener = (message: AppMessage, sender: chrome.runtime.MessageSender) => {
+    const listener = (
+      message: AppMessage,
+      sender: chrome.runtime.MessageSender
+    ) => {
       if (message?.app !== APP_ID) return
       // The bridge content script sends GPTK results via chrome.runtime.sendMessage,
       // which broadcasts to ALL extension contexts — so this listener fires twice:
@@ -211,15 +501,71 @@ export default function App() {
             return
           }
           if (msg.success) healthCheckAttemptsRef.current = 0
+          const currentState = stateRef.current
+          const checkpoint = scanCheckpointRef.current
+          if (
+            msg.success &&
+            checkpoint &&
+            !areScanResultsValid(
+              { accountEmail: checkpoint.accountEmail },
+              { accountEmail: msg.accountEmail }
+            )
+          ) {
+            clearResumeCheckpointState({
+              checkpointRef: scanCheckpointRef,
+              setResumeCheckpoint
+            })
+          }
+          if (
+            msg.success &&
+            currentState.status === "results" &&
+            !areScanResultsValid(
+              { accountEmail: currentState.accountEmail },
+              { accountEmail: msg.accountEmail }
+            )
+          ) {
+            pendingSelectionsRef.current = null
+            setSelectedGroupIds(new Set())
+            setKeptOverrides({})
+            chrome.storage.local.remove(["scanResults", "selections"])
+          }
           dispatch({
             type: "HEALTH_CHECK_RESULT",
             payload: msg
           })
+          if (msg.success && msg.hasGptk) {
+            const key = msg.accountEmail || "__unknown__"
+            if (albumsRequestedForAccountRef.current !== key) {
+              requestAlbums(msg.accountEmail)
+            }
+          }
           break
         }
         case "gptkResult": {
           const result = message as GptkResultMessage
-          if (result.command === "getAllMediaItems") {
+          if (result.command === "listAlbums") {
+            setAlbumsLoading(false)
+            if (result.success) {
+              const nextAlbums = (result.data as GpdAlbum[]).filter(
+                (album) => album.mediaKey
+              )
+              setAlbums(nextAlbums)
+              setAlbumsError(null)
+              const activeAlbum = activeAlbumScope(
+                settingsRef.current.albumScope
+              )
+              if (
+                activeAlbum &&
+                !nextAlbums.some(
+                  (album) => album.mediaKey === activeAlbum.mediaKey
+                )
+              ) {
+                setSettings({ albumScope: undefined })
+              }
+            } else {
+              setAlbumsError(result.error || "Could not load albums.")
+            }
+          } else if (result.command === "getAllMediaItems") {
             // Drop stale results from scans that were killed/cancelled — their
             // GPTK request may have still been in-flight and arrives late
             if (result.requestId !== currentScanRequestIdRef.current) {
@@ -243,45 +589,138 @@ export default function App() {
                 )
                 cachedMediaItemsRef.current = null
               }
+              items = filterMediaItemsByDateRange(
+                items,
+                settingsRef.current.dateRange
+              )
               dispatch({
                 type: "SCAN_MEDIA_FETCHED",
                 mediaItems: items
               })
+              patchScanCheckpoint({
+                phase: "downloading_thumbnails",
+                itemsProcessed: 0,
+                totalEstimate: items.length,
+                message: `Fetched ${items.length} items. Downloading thumbnails...`,
+                mediaItems:
+                  items.length <= MAX_CHECKPOINT_MEDIA_ITEMS ? items : undefined
+              })
               runDuplicateDetection(
                 items,
-                scanAbortRef.current?.signal ?? new AbortController().signal
+                scanAbortRef.current?.signal ?? new AbortController().signal,
+                result.requestId
               )
             } else {
+              patchScanCheckpoint({
+                status: "error",
+                error: result.error || "Scan failed",
+                message: result.error || "Scan failed"
+              })
+              setResumeCheckpoint(scanCheckpointRef.current)
               dispatch({
                 type: "SCAN_ERROR",
                 error: result.error || "Scan failed"
               })
             }
           } else if (result.command === "trashItems") {
+            const data = result.data as
+              | {
+                  trashedKeys?: string[]
+                  trashedDedupKeys?: string[]
+                  trashedCount?: number
+                  partial?: boolean
+                  retryAttempts?: number
+                }
+              | undefined
             if (result.success) {
-              const data = result.data as { trashedKeys: string[] }
-              const trashedKeys = data.trashedKeys || []
+              const attemptedMediaKeys =
+                pendingMediaKeysToTrashRef.current ?? data?.trashedKeys ?? []
+              const attemptedDedupKeys =
+                pendingDedupKeysRef.current ?? data?.trashedDedupKeys ?? []
+              const trashedKeys = data?.trashedKeys ?? attemptedMediaKeys
+              const trashedDedupKeys =
+                data?.trashedDedupKeys ?? attemptedDedupKeys
+              saveTrashResultReport(
+                buildTrashResultReport({
+                  attemptedMediaKeys,
+                  attemptedDedupKeys,
+                  movedMediaKeys: trashedKeys,
+                  movedDedupKeys: trashedDedupKeys,
+                  retryAttempts: data?.retryAttempts
+                })
+              )
               dispatch({ type: "TRASH_COMPLETE", trashedKeys })
               // Set undo data from the snapshot captured before trash
               if (preTrashSnapshotRef.current && pendingDedupKeysRef.current) {
                 setUndoData({
-                  dedupKeys: pendingDedupKeysRef.current,
-                  count: pendingDedupKeysRef.current.length,
+                  dedupKeys: trashedDedupKeys,
+                  count:
+                    trashedKeys.length || pendingDedupKeysRef.current.length,
                   snapshot: preTrashSnapshotRef.current
                 })
+              }
+              preTrashSnapshotRef.current = null
+              pendingDedupKeysRef.current = null
+              pendingMediaKeysToTrashRef.current = null
+            } else {
+              const attemptedMediaKeys =
+                pendingMediaKeysToTrashRef.current ?? data?.trashedKeys ?? []
+              const attemptedDedupKeys =
+                pendingDedupKeysRef.current ?? data?.trashedDedupKeys ?? []
+              const trashedKeys = data?.trashedKeys ?? []
+              const trashedDedupKeys = data?.trashedDedupKeys ?? []
+              saveTrashResultReport(
+                buildTrashResultReport({
+                  attemptedMediaKeys,
+                  attemptedDedupKeys,
+                  movedMediaKeys: trashedKeys,
+                  movedDedupKeys: trashedDedupKeys,
+                  retryAttempts: data?.retryAttempts,
+                  error: result.error || "Trash failed"
+                })
+              )
+              if (data?.partial && trashedKeys.length > 0) {
+                dispatch({ type: "TRASH_COMPLETE", trashedKeys })
+                if (preTrashSnapshotRef.current && trashedDedupKeys.length) {
+                  setUndoData({
+                    dedupKeys: trashedDedupKeys,
+                    count: trashedDedupKeys.length,
+                    snapshot: preTrashSnapshotRef.current
+                  })
+                }
+                setTrashWarning(
+                  `Moved ${trashedKeys.length.toLocaleString()} item${
+                    trashedKeys.length !== 1 ? "s" : ""
+                  } before trash failed: ${result.error || "Trash failed"}`
+                )
                 preTrashSnapshotRef.current = null
                 pendingDedupKeysRef.current = null
+                pendingMediaKeysToTrashRef.current = null
+                break
               }
-            } else {
+              preTrashSnapshotRef.current = null
+              pendingDedupKeysRef.current = null
+              pendingMediaKeysToTrashRef.current = null
               dispatch({
                 type: "TRASH_ERROR",
                 error: result.error || "Trash failed"
               })
             }
           } else if (result.command === "restoreItems") {
+            if (result.requestId !== pendingRestoreRequestIdRef.current) {
+              break
+            }
+            const pendingUndo = pendingRestoreUndoRef.current
+            pendingRestoreUndoRef.current = null
+            pendingRestoreRequestIdRef.current = null
             if (!result.success) {
-              // Optimistic restore already happened in UI; show a non-blocking alert
               console.error("GPD: Restore failed:", result.error)
+              if (pendingUndo) {
+                setUndoData(pendingUndo)
+                setTrashWarning(
+                  `Restore failed: ${result.error || "Google Photos could not restore the moved items."}`
+                )
+              }
             }
           }
           break
@@ -295,10 +734,18 @@ export default function App() {
           const progress = message as GptkProgressMessage
           if (progress.command === "trashItems") {
             console.log(`[GPD] trash progress: ${progress.itemsProcessed}`)
-            dispatch({ type: "TRASH_PROGRESS", trashedSoFar: progress.itemsProcessed })
+            dispatch({
+              type: "TRASH_PROGRESS",
+              trashedSoFar: progress.itemsProcessed
+            })
           } else if (progress.command === "restoreItems") {
             console.log(`[GPD] restore progress: ${progress.itemsProcessed}`)
           } else {
+            patchScanCheckpoint({
+              phase: "fetching",
+              itemsProcessed: progress.itemsProcessed,
+              message: progress.message ?? "Fetching media items..."
+            })
             dispatch({ type: "SCAN_PROGRESS", payload: progress })
           }
           break
@@ -308,7 +755,7 @@ export default function App() {
 
     chrome.runtime.onMessage.addListener(listener)
     return () => chrome.runtime.onMessage.removeListener(listener)
-  }, [])
+  }, [patchScanCheckpoint, saveTrashResultReport])
 
   // Keep refs so async callbacks always see latest values
   const settingsRef = useRef(settings)
@@ -318,11 +765,24 @@ export default function App() {
 
   // Run MediaPipe duplicate detection on fetched media items
   const runDuplicateDetection = useCallback(
-    async (items: GpdMediaItem[], signal: AbortSignal) => {
+    async (items: GpdMediaItem[], signal: AbortSignal, requestId: string) => {
       const logger = scanLoggerRef.current
       await logger.start(items.length)
+      const patchCheckpointForRequest = (
+        patch: Parameters<typeof updateScanCheckpoint>[1]
+      ) => {
+        if (scanCheckpointRef.current?.id !== requestId) return
+        patchScanCheckpoint(patch)
+      }
       try {
         const onProgressCallback = (progress: DetectionProgress) => {
+          if (currentScanRequestIdRef.current !== requestId) return
+          patchCheckpointForRequest({
+            phase: progress.phase,
+            itemsProcessed: progress.current,
+            totalEstimate: progress.total,
+            message: `${progress.phase}: ${progress.current}/${progress.total}`
+          })
           dispatch({
             type: "SCAN_PROGRESS",
             phase: progress.phase,
@@ -336,6 +796,24 @@ export default function App() {
             }
           })
         }
+        const onPartialGroupsCallback = (partialGroups: DuplicateGroup[]) => {
+          if (currentScanRequestIdRef.current !== requestId) return
+          const partialKeys = new Set(
+            partialGroups.flatMap((group) => group.mediaKeys)
+          )
+          const partialMediaItems: Record<string, GpdMediaItem> = {}
+          for (const item of items) {
+            if (partialKeys.has(item.mediaKey)) {
+              partialMediaItems[item.mediaKey] = item
+            }
+          }
+          dispatch({
+            type: "SCAN_PARTIAL_RESULTS",
+            mediaItems: partialMediaItems,
+            groups: partialGroups,
+            totalItems: items.length
+          })
+        }
 
         const groups =
           settingsRef.current.scanMode === "smart"
@@ -345,7 +823,8 @@ export default function App() {
                 (settingsRef.current.smartWindowSec ?? 1) * 1000,
                 onProgressCallback,
                 signal,
-                logger
+                logger,
+                onPartialGroupsCallback
               )
             : await (async () => {
                 const result = await fullDetectDuplicates(
@@ -353,34 +832,65 @@ export default function App() {
                   settingsRef.current.similarityThreshold,
                   onProgressCallback,
                   signal,
-                  logger
+                  logger,
+                  onPartialGroupsCallback
                 )
                 return result.groups
               })()
 
         await logger.finalize("complete", { groupsFound: groups.length })
+        if (currentScanRequestIdRef.current !== requestId) return
+        await clearScanCheckpoint()
+        scanCheckpointRef.current = null
+        setResumeCheckpoint(null)
         currentScanRequestIdRef.current = null
 
+        const groupMediaKeys = new Set(groups.flatMap((g) => g.mediaKeys))
         const mediaItemMap: Record<string, GpdMediaItem> = {}
         for (const item of items) {
-          mediaItemMap[item.mediaKey] = item
+          if (groupMediaKeys.has(item.mediaKey)) {
+            mediaItemMap[item.mediaKey] = item
+          }
         }
 
         dispatch({
           type: "SCAN_COMPLETE",
           mediaItems: mediaItemMap,
-          groups
+          groups,
+          totalItems: items.length
         })
+        refreshEmbeddingCacheCount()
         // Refresh account email after scan — the email in state may be stale
         // if the user switched accounts since the last health check.
         sendToServiceWorker({ app: APP_ID, action: "healthCheck" })
       } catch (error) {
-        currentScanRequestIdRef.current = null
         if (error instanceof DOMException && error.name === "AbortError") {
-          await logger.finalize("cancelled")
-          dispatch({ type: "SCAN_CANCELLED" })
+          await logger.finalize("paused")
+          if (
+            scanCheckpointRef.current?.id === requestId &&
+            scanCheckpointRef.current.status === "active"
+          ) {
+            patchCheckpointForRequest({
+              status: "interrupted",
+              message:
+                "Scan paused. Resume to reuse completed cached embeddings."
+            })
+            setResumeCheckpoint(scanCheckpointRef.current)
+          }
+          if (currentScanRequestIdRef.current === requestId) {
+            currentScanRequestIdRef.current = null
+            dispatch({ type: "SCAN_CANCELLED" })
+          }
         } else {
           await logger.finalize("error", { error: String(error) })
+          if (currentScanRequestIdRef.current !== requestId) return
+          currentScanRequestIdRef.current = null
+          patchCheckpointForRequest({
+            status: "error",
+            error: String(error),
+            message: `Duplicate detection failed: ${error}`
+          })
+          setResumeCheckpoint(scanCheckpointRef.current)
           dispatch({
             type: "SCAN_ERROR",
             error: `Duplicate detection failed: ${error}`
@@ -388,34 +898,49 @@ export default function App() {
         }
       }
     },
-    []
+    [patchScanCheckpoint, refreshEmbeddingCacheCount, requestAlbums]
   )
 
   // Health check on mount + recover any scan log entry orphaned by a page reload
   useEffect(() => {
     sendToServiceWorker({ app: APP_ID, action: "healthCheck" })
     scanLoggerRef.current.recoverStale()
-  }, [])
+    refreshEmbeddingCacheCount()
+  }, [refreshEmbeddingCacheCount])
 
   // Load saved settings and results on mount
   useEffect(() => {
     chrome.storage.local.get(
-      ["settings", "scanResults", "selections"],
+      ["settings", "scanResults", "selections", SCAN_CHECKPOINT_KEY],
       (result: Partial<StoredState>) => {
+        const checkpoint = result.scanCheckpoint
+        if (checkpoint?.status === "active") {
+          const interrupted = updateScanCheckpoint(checkpoint, {
+            status: "interrupted",
+            message:
+              "Previous scan was interrupted. Resume to reuse completed cached embeddings."
+          })
+          scanCheckpointRef.current = interrupted
+          setResumeCheckpoint(interrupted)
+          void persistScanCheckpoint(interrupted)
+        } else if (shouldOfferResume(checkpoint)) {
+          scanCheckpointRef.current = checkpoint
+          setResumeCheckpoint(checkpoint)
+        }
         if (result.settings) {
-          setSettings(result.settings)
+          setSettings(normalizeStoredSettings(result.settings))
         }
         if (result.selections) {
           // Store deserialized selections before dispatching LOAD_SAVED_RESULTS so
           // the groups-change effect can apply them when groups first appear
-          pendingSelectionsRef.current = {
-            selectedGroupIds: new Set(result.selections.selectedGroupIds),
-            keptOverrides: Object.fromEntries(
-              Object.entries(result.selections.keptOverrides).map(([k, v]) => [k, new Set(v)])
-            ),
-          }
+          pendingSelectionsRef.current = deserializeStoredSelections(
+            result.selections
+          )
         }
-        if (result.scanResults?.totalItems && Array.isArray(result.scanResults.groups)) {
+        if (
+          result.scanResults?.totalItems &&
+          Array.isArray(result.scanResults.groups)
+        ) {
           dispatch({
             type: "LOAD_SAVED_RESULTS",
             mediaItems: result.scanResults.mediaItems,
@@ -432,26 +957,109 @@ export default function App() {
   // Persist scan results when they change (after scan or trash)
   const mediaItems = state.status === "results" ? state.mediaItems : null
 
-  // Stable default kept sets (one per group, only changes when groups or mediaItems change).
-  // Uses smart keep selection: original quality > higher resolution > oldest upload date.
+  const groupClassificationById = useMemo(() => {
+    const m = new Map<string, "exact" | "similar">()
+    if (Object.keys(displayMediaItems).length === 0) return m
+    for (const group of groups) {
+      m.set(
+        group.id,
+        group.duplicateKind ??
+          classifyDuplicateGroup(group, displayMediaItems).duplicateKind
+      )
+    }
+    return m
+  }, [groups, displayMediaItems])
+
+  const exactGroupCount = useMemo(
+    () =>
+      groups.reduce(
+        (count, group) =>
+          count + (groupClassificationById.get(group.id) === "exact" ? 1 : 0),
+        0
+      ),
+    [groups, groupClassificationById]
+  )
+  const similarGroupCount = groups.length - exactGroupCount
+  const visibleGroups = useMemo(() => {
+    if (reviewFilter === "all") return groups
+    return groups.filter(
+      (group) => groupClassificationById.get(group.id) === reviewFilter
+    )
+  }, [groups, groupClassificationById, reviewFilter])
+  const provisionalGroups =
+    state.status === "scanning" ? groups : visibleGroups
+
+  const handleSelectAll = useCallback(() => {
+    setSelectedGroupIds((prev) => {
+      const next = new Set(prev)
+      for (const group of visibleGroups) next.add(group.id)
+      return next
+    })
+  }, [visibleGroups])
+
+  const handleDeselectAll = useCallback(() => {
+    setSelectedGroupIds((prev) => {
+      const next = new Set(prev)
+      for (const group of visibleGroups) next.delete(group.id)
+      return next
+    })
+  }, [visibleGroups])
+
+  // Stable default kept sets (one per group, only changes when groups or media items change).
+  // Uses smart keep selection: original quality > oldest taken date > higher resolution.
   const defaultKeptSets = useMemo(() => {
     const m = new Map<string, Set<string>>()
     for (const g of groups) {
-      const groupItems = mediaItems
-        ? g.mediaKeys.map((k) => mediaItems[k]).filter(Boolean)
-        : []
+      const groupItems = g.mediaKeys
+        .map((k) => displayMediaItems[k])
+        .filter(Boolean)
       const defaultKey =
-        groupItems.length > 0 ? selectDefaultKeep(groupItems) : g.originalMediaKey
+        groupItems.length > 0
+          ? selectDefaultKeep(groupItems)
+          : g.originalMediaKey
       m.set(g.id, new Set([defaultKey]))
     }
     return m
-  }, [groups, mediaItems])
+  }, [groups, displayMediaItems])
 
   const getKept = useCallback(
     (group: DuplicateGroup): Set<string> =>
-      keptOverrides[group.id] ?? defaultKeptSets.get(group.id) ?? new Set([group.originalMediaKey]),
+      keptOverrides[group.id] ??
+      defaultKeptSets.get(group.id) ??
+      new Set([group.originalMediaKey]),
     [keptOverrides, defaultKeptSets]
   )
+
+  const buildCurrentReviewReport = useCallback(() => {
+    const currentState = stateRef.current
+    if (currentState.status !== "results") return null
+    return buildReviewReport({
+      groups: visibleGroups,
+      mediaItems: currentState.mediaItems,
+      selectedGroupIds,
+      getKept
+    })
+  }, [getKept, selectedGroupIds, visibleGroups])
+
+  const handleExportJson = useCallback(() => {
+    const report = buildCurrentReviewReport()
+    if (!report) return
+    downloadTextFile({
+      filename: `${report.reportId}.json`,
+      contents: JSON.stringify(report, null, 2),
+      type: "application/json"
+    })
+  }, [buildCurrentReviewReport])
+
+  const handleExportCsv = useCallback(() => {
+    const report = buildCurrentReviewReport()
+    if (!report) return
+    downloadTextFile({
+      filename: `${report.reportId}.csv`,
+      contents: reviewReportToCsv(report),
+      type: "text/csv"
+    })
+  }, [buildCurrentReviewReport])
 
   // Per-group kept sets: overridden groups use the live override Set (changes only for
   // the toggled group); unoverridden groups reuse the stable default Set from above so
@@ -467,7 +1075,10 @@ export default function App() {
   const handleToggleKept = useCallback(
     (group: DuplicateGroup, mediaKey: string) => {
       setKeptOverrides((prev) => {
-        const current = prev[group.id] ?? defaultKeptSets.get(group.id) ?? new Set([group.originalMediaKey])
+        const current =
+          prev[group.id] ??
+          defaultKeptSets.get(group.id) ??
+          new Set([group.originalMediaKey])
         // Prevent removing the last kept item
         if (current.has(mediaKey) && current.size === 1) return prev
         const next = new Set(current)
@@ -481,15 +1092,35 @@ export default function App() {
     },
     [defaultKeptSets]
   )
+
+  const handleApplyKeepStrategy = useCallback(
+    (strategy: KeepStrategy) => {
+      if (!mediaItems) return
+      setKeptOverrides((prev) => {
+        const next: Record<string, Set<string>> = { ...prev }
+        for (const group of visibleGroups) {
+          const keepKey = chooseKeepKeyForGroup(group, mediaItems, strategy)
+          if (keepKey) next[group.id] = new Set([keepKey])
+        }
+        return next
+      })
+    },
+    [mediaItems, visibleGroups]
+  )
   const totalItems = state.status === "results" ? state.totalItems : 0
-  const accountEmailForStorage = state.status === "results" ? state.accountEmail : undefined
+  const accountEmailForStorage =
+    state.status === "results" ? state.accountEmail : undefined
   useEffect(() => {
     if (!mediaItems) return
     if (groups.length > 0) {
-      const newestCreationTimestamp = Object.values(mediaItems).reduce(
-        (max, item) => Math.max(max, item.creationTimestamp ?? 0),
-        0
-      )
+      const storedMediaItemCount = Object.keys(mediaItems).length
+      const mediaItemsAreComplete = storedMediaItemCount === totalItems
+      const newestCreationTimestamp = mediaItemsAreComplete
+        ? Object.values(mediaItems).reduce(
+            (max, item) => Math.max(max, item.creationTimestamp ?? 0),
+            0
+          )
+        : undefined
       chrome.storage.local.set({
         scanResults: {
           mediaItems,
@@ -497,14 +1128,24 @@ export default function App() {
           scanDate: Date.now(),
           totalItems,
           newestCreationTimestamp,
-          accountEmail: accountEmailForStorage
+          mediaItemsAreComplete,
+          accountEmail: accountEmailForStorage,
+          dateRange: activeDateRange(settings.dateRange),
+          albumScope: activeAlbumScope(settings.albumScope)
         }
       })
     } else {
       // All duplicates removed — clear saved results so next open starts fresh
       chrome.storage.local.remove("scanResults")
     }
-  }, [groups, mediaItems, totalItems, accountEmailForStorage])
+  }, [
+    groups,
+    mediaItems,
+    totalItems,
+    accountEmailForStorage,
+    settings.dateRange,
+    settings.albumScope
+  ])
 
   // Persist selections when they change (only while results are showing)
   useEffect(() => {
@@ -513,88 +1154,276 @@ export default function App() {
       chrome.storage.local.remove("selections")
       return
     }
+    const validGroups = new Map(groups.map((group) => [group.id, group]))
+    const validSelectedGroupIds = [...selectedGroupIds].filter((id) =>
+      validGroups.has(id)
+    )
+    const validKeptOverrides: Record<string, string[]> = {}
+    for (const [id, keys] of Object.entries(keptOverrides)) {
+      const group = validGroups.get(id)
+      if (!group) continue
+      const validKeys = new Set(group.mediaKeys)
+      const filteredKeys = [...keys].filter((key) => validKeys.has(key))
+      if (filteredKeys.length > 0) validKeptOverrides[id] = filteredKeys
+    }
     chrome.storage.local.set({
       selections: {
-        selectedGroupIds: [...selectedGroupIds],
-        keptOverrides: Object.fromEntries(
-          Object.entries(keptOverrides).map(([k, v]) => [k, [...v]])
-        ),
-      },
+        selectedGroupIds: validSelectedGroupIds,
+        keptOverrides: validKeptOverrides
+      }
     })
-  }, [selectedGroupIds, keptOverrides, state.status, groups.length])
+  }, [selectedGroupIds, keptOverrides, state.status, groups])
 
   // Save settings on change
   useEffect(() => {
     chrome.storage.local.set({ settings })
   }, [settings])
 
-  const handleStartScan = useCallback(async () => {
-    // Cancel any in-progress scan
-    scanAbortRef.current?.abort()
-    scanAbortRef.current = new AbortController()
+  const handleStartScan = useCallback(
+    async (settingsOverride?: ScanSettings) => {
+      const scanSettings = settingsOverride ?? settings
+      settingsRef.current = scanSettings
+      if (settingsOverride) {
+        setSettings(fullScanSettingsPatch(scanSettings))
+        await chrome.storage.local.set({ settings: scanSettings })
+      }
 
-    const requestId = generateRequestId()
-    currentScanRequestIdRef.current = requestId
+      // Cancel any in-progress scan
+      scanAbortRef.current?.abort()
+      scanAbortRef.current = new AbortController()
+
+      const requestId = generateRequestId()
+      currentScanRequestIdRef.current = requestId
+      const currentState = stateRef.current
+      const hasGptk =
+        currentState.status === "connected" ? currentState.hasGptk : true
+      const accountEmail =
+        currentState.status === "connected" || currentState.status === "results"
+          ? currentState.accountEmail
+          : undefined
+      const checkpoint = createScanCheckpoint({
+        id: requestId,
+        settings: scanSettings,
+        accountEmail
+      })
+      scanCheckpointRef.current = checkpoint
+      setResumeCheckpoint(null)
+      void persistScanCheckpoint(checkpoint)
+
+      dispatch({ type: "SCAN_STARTED", requestId, hasGptk, accountEmail })
+
+      console.log(
+        `[GPD] starting scan: mode=${scanSettings.scanMode}, threshold=${scanSettings.similarityThreshold}`
+      )
+
+      // Load cached media items for incremental fetch. Scoped scans avoid the
+      // incremental cache so a year/month result cannot poison a later full scan.
+      cachedMediaItemsRef.current = null
+      let sinceTimestamp: number | undefined
+      const dateRange = activeDateRange(scanSettings.dateRange)
+      const albumScope = activeAlbumScope(scanSettings.albumScope)
+      try {
+        const stored = (await chrome.storage.local.get(
+          "scanResults"
+        )) as Partial<StoredState>
+        const prev = stored.scanResults
+        if (
+          !dateRange &&
+          !albumScope &&
+          !prev?.dateRange &&
+          !prev?.albumScope &&
+          prev?.mediaItems &&
+          Object.keys(prev.mediaItems).length > 0 &&
+          prev.mediaItemsAreComplete !== false &&
+          Object.keys(prev.mediaItems).length === prev.totalItems &&
+          areScanResultsValid(prev, { accountEmail })
+        ) {
+          cachedMediaItemsRef.current = prev.mediaItems
+          // Compute watermark if not stored (migration: first run after this deploy)
+          sinceTimestamp =
+            prev.newestCreationTimestamp ??
+            Object.values(prev.mediaItems).reduce(
+              (max, item) => Math.max(max, item.creationTimestamp ?? 0),
+              0
+            )
+          console.log(
+            `[GPD] media items cache: ${Object.keys(prev.mediaItems).length} items, fetching since ${new Date(sinceTimestamp).toISOString()}`
+          )
+        }
+      } catch {
+        // Cache unavailable — do full fetch
+      }
+
+      sendToServiceWorker({
+        app: APP_ID,
+        action: "gptkCommand",
+        command: "getAllMediaItems",
+        requestId,
+        args: {
+          dateRange,
+          albumScope,
+          sinceTimestamp
+        }
+      })
+    },
+    [settings]
+  )
+
+  const clearEmbeddingCache = useCallback(async (): Promise<number | null> => {
+    let cache: EmbeddingCache | null = null
+    try {
+      cache = await EmbeddingCache.open()
+      const before = await cache.count()
+      await cache.clear()
+      setCacheEntryCount(0)
+      return before
+    } finally {
+      cache?.close()
+    }
+  }, [])
+
+  const handleClearCache = useCallback(async () => {
+    setCacheBusy(true)
+    setCacheStatus(undefined)
+    try {
+      const removed = await clearEmbeddingCache()
+      setCacheStatus(
+        `Cleared ${(removed ?? 0).toLocaleString()} cached embedding${
+          removed !== 1 ? "s" : ""
+        }.`
+      )
+    } catch (error) {
+      setCacheStatus(
+        `Could not clear cache: ${error instanceof Error ? error.message : String(error)}`
+      )
+      await refreshEmbeddingCacheCount()
+    } finally {
+      setCacheBusy(false)
+    }
+  }, [clearEmbeddingCache, refreshEmbeddingCacheCount])
+
+  const handleRebuildCache = useCallback(async () => {
+    setCacheBusy(true)
+    setCacheStatus(undefined)
+    try {
+      const removed = await clearEmbeddingCache()
+      setCacheStatus(
+        `Cleared ${(removed ?? 0).toLocaleString()} cached embedding${
+          removed !== 1 ? "s" : ""
+        }. Rebuilding on the next scan.`
+      )
+    } catch (error) {
+      setCacheStatus(
+        `Could not rebuild cache: ${error instanceof Error ? error.message : String(error)}`
+      )
+      setCacheBusy(false)
+      await refreshEmbeddingCacheCount()
+      return
+    }
+    setCacheBusy(false)
+    handleStartScan()
+  }, [clearEmbeddingCache, handleStartScan, refreshEmbeddingCacheCount])
+
+  const handleExportCacheDiagnostics = useCallback(async () => {
+    setCacheBusy(true)
+    setCacheStatus(undefined)
+    let cache: EmbeddingCache | null = null
+    try {
+      cache = await EmbeddingCache.open()
+      const records = await cache.allRecords()
+      const report = buildCacheDiagnosticsReport(records)
+      downloadTextFile({
+        filename: `${report.reportId}.json`,
+        contents: JSON.stringify(report, null, 2),
+        type: "application/json"
+      })
+      setCacheStatus(
+        `Exported diagnostics for ${report.totalRecords.toLocaleString()} cached embedding${
+          report.totalRecords !== 1 ? "s" : ""
+        }.`
+      )
+    } catch (error) {
+      setCacheStatus(
+        `Could not export cache diagnostics: ${error instanceof Error ? error.message : String(error)}`
+      )
+    } finally {
+      cache?.close()
+      setCacheBusy(false)
+    }
+  }, [])
+
+  const handleResumeScan = useCallback(() => {
+    if (!resumeCheckpoint) return
     const currentState = stateRef.current
-    const hasGptk = currentState.status === "connected" ? currentState.hasGptk : true
     const accountEmail =
       currentState.status === "connected" || currentState.status === "results"
         ? currentState.accountEmail
-        : undefined
-    dispatch({ type: "SCAN_STARTED", requestId, hasGptk, accountEmail })
+        : resumeCheckpoint.accountEmail
 
-    console.log(
-      `[GPD] starting scan: mode=${settings.scanMode}, threshold=${settings.similarityThreshold}`
-    )
-
-    // Load cached media items for incremental fetch. On a repeat scan we only
-    // fetch items newer than the most-recently-seen upload timestamp.
-    cachedMediaItemsRef.current = null
-    let sinceTimestamp: number | undefined
-    try {
-      const stored = (await chrome.storage.local.get(
-        "scanResults"
-      )) as Partial<StoredState>
-      const prev = stored.scanResults
-      if (
-        prev?.mediaItems &&
-        Object.keys(prev.mediaItems).length > 0 &&
-        areScanResultsValid(prev, { accountEmail })
-      ) {
-        cachedMediaItemsRef.current = prev.mediaItems
-        // Compute watermark if not stored (migration: first run after this deploy)
-        sinceTimestamp =
-          prev.newestCreationTimestamp ??
-          Object.values(prev.mediaItems).reduce(
-            (max, item) => Math.max(max, item.creationTimestamp ?? 0),
-            0
-          )
-        console.log(
-          `[GPD] media items cache: ${Object.keys(prev.mediaItems).length} items, fetching since ${new Date(sinceTimestamp).toISOString()}`
-        )
-      }
-    } catch {
-      // Cache unavailable — do full fetch
+    if (!canResumeScanCheckpoint(resumeCheckpoint, { accountEmail })) {
+      clearResumeCheckpointState({
+        checkpointRef: scanCheckpointRef,
+        setResumeCheckpoint
+      })
+      return
     }
 
-    sendToServiceWorker({
-      app: APP_ID,
-      action: "gptkCommand",
-      command: "getAllMediaItems",
-      requestId,
-      args: {
-        dateRange: settings.dateRange,
-        sinceTimestamp
-      }
-    })
-  }, [settings])
+    const checkpointItems = resumeCheckpoint.mediaItems
+    if (checkpointItems && checkpointItems.length > 0) {
+      const scanSettings = resumeCheckpoint.settings
+      settingsRef.current = scanSettings
+      setSettings(fullScanSettingsPatch(scanSettings))
+      void chrome.storage.local.set({ settings: scanSettings })
+
+      scanAbortRef.current?.abort()
+      scanAbortRef.current = new AbortController()
+
+      const requestId = generateRequestId()
+      currentScanRequestIdRef.current = requestId
+      const hasGptk =
+        currentState.status === "connected" ? currentState.hasGptk : true
+
+      const resumedCheckpoint = updateScanCheckpoint(
+        {
+          ...resumeCheckpoint,
+          id: requestId,
+          status: "active"
+        },
+        {
+          phase: "downloading_thumbnails",
+          itemsProcessed: 0,
+          totalEstimate: checkpointItems.length,
+          message: `Resuming duplicate detection for ${checkpointItems.length.toLocaleString()} fetched items...`
+        }
+      )
+      scanCheckpointRef.current = resumedCheckpoint
+      setResumeCheckpoint(null)
+      void persistScanCheckpoint(resumedCheckpoint)
+
+      dispatch({ type: "SCAN_STARTED", requestId, hasGptk, accountEmail })
+      dispatch({ type: "SCAN_MEDIA_FETCHED", mediaItems: checkpointItems })
+      runDuplicateDetection(
+        checkpointItems,
+        scanAbortRef.current.signal,
+        requestId
+      )
+      return
+    }
+    handleStartScan(resumeCheckpoint.settings)
+  }, [handleStartScan, resumeCheckpoint, runDuplicateDetection])
+
+  const handleDismissResume = useCallback(() => {
+    setResumeCheckpoint(null)
+    scanCheckpointRef.current = null
+    void clearScanCheckpoint()
+  }, [])
 
   const handleTrash = useCallback(() => {
     if (state.status !== "results") return
 
     const dedupKeys: string[] = []
     const mediaKeysToTrash: string[] = []
-    for (const group of state.groups) {
+    for (const group of visibleGroups) {
       if (!selectedGroupIds.has(group.id)) continue
       const keptSet = getKept(group)
       for (const key of group.mediaKeys) {
@@ -608,13 +1437,39 @@ export default function App() {
     }
 
     if (dedupKeys.length === 0) return
+    setTrashConfirmCount("")
     setTrashConfirm({ dedupKeys, mediaKeysToTrash })
-  }, [state, selectedGroupIds, getKept])
+  }, [state, selectedGroupIds, getKept, visibleGroups])
 
-  const handleTrashConfirmed = useCallback(() => {
+  const handleCloseTrashConfirm = useCallback(() => {
+    setTrashConfirm(null)
+    setTrashConfirmCount("")
+  }, [])
+
+  const handleTrashConfirmed = useCallback(async () => {
     if (!trashConfirm || state.status !== "results") return
     const { dedupKeys, mediaKeysToTrash } = trashConfirm
-    setTrashConfirm(null)
+    setReportError(null)
+
+    const deleteReport = buildDeleteReport({
+      groups: visibleGroups,
+      mediaItems: state.mediaItems,
+      selectedGroupIds,
+      getKept,
+      mediaKeysToTrash,
+      trashBatchSize: TRASH_BATCH_SIZE
+    })
+    try {
+      await persistDeleteReport(deleteReport)
+      downloadDeleteReport(deleteReport)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setReportError(`Could not save the pre-trash report: ${message}`)
+      return
+    }
+
+    handleCloseTrashConfirm()
+    setTrashWarning(null)
 
     const requestId = generateRequestId()
 
@@ -625,6 +1480,7 @@ export default function App() {
       totalItems: state.totalItems
     }
     pendingDedupKeysRef.current = dedupKeys
+    pendingMediaKeysToTrashRef.current = mediaKeysToTrash
 
     dispatch({
       type: "TRASH_STARTED",
@@ -639,17 +1495,65 @@ export default function App() {
       action: "gptkCommand",
       command: "trashItems",
       requestId,
-      args: { dedupKeys, mediaKeysToTrash }
+      args: {
+        dedupKeys,
+        mediaKeysToTrash,
+        batchSize: TRASH_BATCH_SIZE,
+        batchPauseMs: TRASH_BATCH_PAUSE_MS,
+        retryCount: TRASH_RETRY_COUNT,
+        retryBackoffMs: TRASH_RETRY_BACKOFF_MS
+      }
     })
-  }, [trashConfirm, state])
+  }, [
+    trashConfirm,
+    state,
+    selectedGroupIds,
+    getKept,
+    visibleGroups,
+    handleCloseTrashConfirm
+  ])
 
-  const handleCancelScan = useCallback(() => {
+  const handlePauseScan = useCallback(() => {
+    const checkpoint = scanCheckpointRef.current
+    if (checkpoint?.status === "active") {
+      const paused = updateScanCheckpoint(checkpoint, {
+        status: "interrupted",
+        message: "Scan paused. Resume to reuse completed cached embeddings."
+      })
+      scanCheckpointRef.current = paused
+      setResumeCheckpoint(paused)
+      void persistScanCheckpoint(paused)
+    }
     scanAbortRef.current?.abort()
     currentScanRequestIdRef.current = null
     dispatch({ type: "SCAN_CANCELLED" })
   }, [])
 
   const handleReset = useCallback(() => {
+    scanAbortRef.current?.abort()
+    scanAbortRef.current = null
+    currentScanRequestIdRef.current = null
+    scanCheckpointRef.current = null
+    cachedMediaItemsRef.current = null
+    pendingSelectionsRef.current = null
+    preTrashSnapshotRef.current = null
+    pendingDedupKeysRef.current = null
+    pendingMediaKeysToTrashRef.current = null
+    pendingRestoreUndoRef.current = null
+    pendingRestoreRequestIdRef.current = null
+    setResumeCheckpoint(null)
+    setSelectedGroupIds(new Set())
+    setKeptOverrides({})
+    setTrashConfirm(null)
+    setTrashConfirmCount("")
+    setTrashWarning(null)
+    setReportError(null)
+    setUndoData(null)
+    void chrome.storage.local.remove([
+      "scanResults",
+      "selections",
+      SCAN_CHECKPOINT_KEY
+    ])
     dispatch({ type: "RESET" })
     healthCheckAttemptsRef.current = 0
     sendToServiceWorker({ app: APP_ID, action: "healthCheck" })
@@ -657,6 +1561,9 @@ export default function App() {
 
   const handleUndo = useCallback(() => {
     if (!undoData) return
+    const requestId = generateRequestId()
+    pendingRestoreUndoRef.current = undoData
+    pendingRestoreRequestIdRef.current = requestId
     // Optimistically restore the UI to the pre-trash state
     dispatch({
       type: "RESTORE_SNAPSHOT",
@@ -669,10 +1576,11 @@ export default function App() {
       app: APP_ID,
       action: "gptkCommand",
       command: "restoreItems",
-      requestId: generateRequestId(),
+      requestId,
       args: { dedupKeys: undoData.dedupKeys }
     })
     setUndoData(null)
+    setTrashWarning(null)
   }, [undoData])
 
   const handleUndoClose = useCallback(() => {
@@ -692,7 +1600,7 @@ export default function App() {
   // Compute duplicate count for ActionBar
   const duplicateCount =
     state.status === "results"
-      ? groups.reduce((sum, group) => {
+      ? visibleGroups.reduce((sum, group) => {
           if (!selectedGroupIds.has(group.id)) return sum
           const keptSet = keptByGroupId.get(group.id)!
           return sum + group.mediaKeys.filter((k) => !keptSet.has(k)).length
@@ -762,52 +1670,99 @@ export default function App() {
             settings={settings}
             onSettingsChange={setSettings}
             onStartScan={handleStartScan}
+            onResumeScan={handleResumeScan}
+            onDismissResume={handleDismissResume}
+            onClearCache={handleClearCache}
+            onRebuildCache={handleRebuildCache}
+            onExportCacheDiagnostics={handleExportCacheDiagnostics}
             hasGptk={state.hasGptk}
+            cacheEntryCount={cacheEntryCount}
+            cacheStatus={cacheStatus}
+            cacheBusy={cacheBusy}
+            resumeCheckpoint={resumeCheckpoint}
+            albums={albums}
+            albumsLoading={albumsLoading}
+            albumsError={albumsError}
+            onRefreshAlbums={() => requestAlbums(state.accountEmail)}
           />
         )}
 
         {state.status === "scanning" && (
-          <ScanProgress
-            phase={state.phase}
-            itemsProcessed={state.itemsProcessed}
-            totalEstimate={state.totalEstimate}
-            message={state.message}
-            onCancel={handleCancelScan}
-          />
+          <>
+            <ScanProgress
+              phase={state.phase}
+              itemsProcessed={state.itemsProcessed}
+              totalEstimate={state.totalEstimate}
+              message={state.message}
+              onPause={handlePauseScan}
+            />
+            {provisionalGroups.length > 0 && (
+              <Box sx={{ mt: 3 }}>
+                <Alert severity="info" sx={{ mb: 2 }}>
+                  Showing provisional duplicate groups while the scan continues.
+                  Trash actions unlock after the scan completes.
+                </Alert>
+                <DuplicateGroups
+                  groups={provisionalGroups}
+                  mediaItems={displayMediaItems}
+                  selectedGroupIds={new Set()}
+                  onToggleGroup={() => {}}
+                  keptByGroupId={keptByGroupId}
+                  onToggleKept={() => {}}
+                  readOnly
+                  heading={`${provisionalGroups.length} Duplicate Group${provisionalGroups.length !== 1 ? "s" : ""} Found So Far`}
+                />
+              </Box>
+            )}
+          </>
         )}
 
-        {state.status === "results" && groups.length === 0 && storageChecked && (
-          <Box
-            sx={{
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              pt: 8,
-              gap: 2
-            }}>
-            <Typography variant="h6" color="text.secondary">
-              No duplicates found in your library.
-            </Typography>
-            <Button variant="contained" onClick={handleReset}>
-              Back to Scan
-            </Button>
-          </Box>
-        )}
+        {state.status === "results" &&
+          groups.length === 0 &&
+          storageChecked && (
+            <Box
+              sx={{
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                pt: 8,
+                gap: 2
+              }}>
+              <Typography variant="h6" color="text.secondary">
+                No duplicates found in your library.
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                For reuploads or copies taken years apart, use Full scan and
+                move the threshold toward More matches.
+              </Typography>
+              <Button variant="contained" onClick={handleReset}>
+                Back to Scan
+              </Button>
+            </Box>
+          )}
 
         {state.status === "results" && groups.length > 0 && (
           <>
             <ActionBar
               totalItems={state.totalItems}
-              groupCount={groups.length}
+              groupCount={visibleGroups.length}
+              totalGroupCount={groups.length}
+              exactGroupCount={exactGroupCount}
+              similarGroupCount={similarGroupCount}
               duplicateCount={duplicateCount}
+              reviewFilter={reviewFilter}
+              onReviewFilterChange={setReviewFilter}
               onSelectAll={handleSelectAll}
               onDeselectAll={handleDeselectAll}
               onTrash={handleTrash}
               onRescan={handleReset}
+              onExportJson={handleExportJson}
+              onExportCsv={handleExportCsv}
+              onApplyKeepStrategy={handleApplyKeepStrategy}
             />
             <DuplicateGroups
-              groups={state.groups}
-              mediaItems={state.mediaItems}
+              groups={visibleGroups}
+              mediaItems={displayMediaItems}
               selectedGroupIds={selectedGroupIds}
               onToggleGroup={handleToggleGroup}
               keptByGroupId={keptByGroupId}
@@ -831,28 +1786,52 @@ export default function App() {
             </Box>
             <LinearProgress
               variant={state.trashedSoFar > 0 ? "determinate" : "indeterminate"}
-              value={Math.round((state.trashedSoFar / state.totalToTrash) * 100)}
+              value={Math.round(
+                (state.trashedSoFar / state.totalToTrash) * 100
+              )}
             />
           </Box>
         )}
       </Box>
 
       {/* Trash confirm dialog */}
-      <Dialog open={!!trashConfirm} onClose={() => setTrashConfirm(null)}>
+      <Dialog open={!!trashConfirm} onClose={handleCloseTrashConfirm}>
         <DialogTitle>Move to Trash</DialogTitle>
         <DialogContent>
+          {reportError && (
+            <Alert severity="error" sx={{ mb: 2 }}>
+              {reportError}
+            </Alert>
+          )}
           <DialogContentText>
             Move {trashConfirm?.dedupKeys.length} duplicate
             {trashConfirm?.dedupKeys.length !== 1 ? "s" : ""} to trash? You can
-            restore them from the Google Photos trash.
+            restore them from the Google Photos trash. A JSON audit report will
+            be saved before anything is moved. Items are moved in batches of{" "}
+            {TRASH_BATCH_SIZE}.
           </DialogContentText>
+          <TextField
+            autoFocus
+            fullWidth
+            margin="normal"
+            label={`Type ${trashConfirm?.dedupKeys.length ?? 0} to confirm`}
+            value={trashConfirmCount}
+            onChange={(event) => setTrashConfirmCount(event.target.value)}
+            inputProps={{
+              inputMode: "numeric",
+              pattern: "[0-9]*"
+            }}
+          />
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setTrashConfirm(null)}>Cancel</Button>
+          <Button onClick={handleCloseTrashConfirm}>Cancel</Button>
           <Button
             onClick={handleTrashConfirmed}
             variant="contained"
-            color="error">
+            color="error"
+            disabled={
+              trashConfirmCount !== String(trashConfirm?.dedupKeys.length ?? "")
+            }>
             Move to Trash
           </Button>
         </DialogActions>
@@ -860,7 +1839,7 @@ export default function App() {
 
       {/* Undo trash snackbar */}
       <Snackbar
-        open={!!undoData}
+        open={!!undoData && !trashWarning}
         autoHideDuration={null}
         onClose={handleUndoClose}
         anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
@@ -875,6 +1854,29 @@ export default function App() {
               Undo
             </Button>
             <IconButton size="small" color="inherit" onClick={handleUndoClose}>
+              <CloseIcon fontSize="small" />
+            </IconButton>
+          </>
+        }
+      />
+
+      <Snackbar
+        open={!!trashWarning}
+        autoHideDuration={null}
+        onClose={() => setTrashWarning(null)}
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+        message={trashWarning ?? ""}
+        action={
+          <>
+            {undoData && (
+              <Button color="secondary" size="small" onClick={handleUndo}>
+                Undo moved items
+              </Button>
+            )}
+            <IconButton
+              size="small"
+              color="inherit"
+              onClick={() => setTrashWarning(null)}>
               <CloseIcon fontSize="small" />
             </IconButton>
           </>

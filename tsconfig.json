@@ -1,6 +1,8 @@
 {
   "extends": "plasmo/templates/tsconfig.base",
   "exclude": [
+    "Google-Photos-Toolkit",
+    "build",
     "node_modules",
     "workers",
     "vitest.config.ts"
