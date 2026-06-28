@@ -90,6 +90,225 @@ export interface ScanTiming {
 type ProgressCallback = (progress: DetectionProgress) => void
 type DuplicateGroupsCallback = (groups: DuplicateGroup[]) => void
 
+const VIDEO_VISUAL_THRESHOLD_FLOOR = 0.88
+const VIDEO_VISUAL_THRESHOLD_DELTA = 0.06
+const VIDEO_DURATION_TOLERANCE_MS = 1000
+
+function sortGroupItems(items: GpdMediaItem[]): GpdMediaItem[] {
+  return [...items].sort(
+    (a, b) => (a.creationTimestamp ?? 0) - (b.creationTimestamp ?? 0)
+  )
+}
+
+function buildDuplicateGroup(
+  items: GpdMediaItem[],
+  index: number,
+  similarity: number
+): DuplicateGroup {
+  const sorted = sortGroupItems(items)
+  return {
+    id: `group-${index}`,
+    mediaKeys: sorted.map((item) => item.mediaKey),
+    originalMediaKey: selectDefaultKeep(items),
+    similarity,
+    ...classifyDuplicateItems(items)
+  }
+}
+
+function normalizeFileStem(fileName: string | undefined): string | null {
+  if (!fileName) return null
+  const normalized = fileName.trim().toLowerCase()
+  if (!normalized) return null
+  return normalized.replace(/\.[a-z0-9]{1,8}$/i, "")
+}
+
+function isVideo(item: GpdMediaItem): boolean {
+  return Number.isFinite(item.duration) && (item.duration ?? 0) > 0
+}
+
+function haveCloseVideoDuration(a: GpdMediaItem, b: GpdMediaItem): boolean {
+  if (!isVideo(a) || !isVideo(b)) return false
+  return Math.abs((a.duration ?? 0) - (b.duration ?? 0)) <= VIDEO_DURATION_TOLERANCE_MS
+}
+
+export function findDedupKeyDuplicateGroups(
+  items: GpdMediaItem[]
+): GpdMediaItem[][] {
+  const buckets = new Map<string, GpdMediaItem[]>()
+  for (const item of items) {
+    if (!item.dedupKey) continue
+    const bucket = buckets.get(item.dedupKey) ?? []
+    bucket.push(item)
+    buckets.set(item.dedupKey, bucket)
+  }
+  return [...buckets.values()]
+    .filter((group) => group.length >= 2)
+    .map(sortGroupItems)
+}
+
+export function findVideoPosterDuplicateGroups(
+  items: GpdMediaItem[],
+  embeddings: Float32Array[],
+  validIndices: number[],
+  threshold: number
+): GpdMediaItem[][] {
+  const videoRows = validIndices
+    .map((itemIndex, embeddingIndex) => ({
+      item: items[itemIndex],
+      embedding: embeddings[embeddingIndex]
+    }))
+    .filter(({ item }) => isVideo(item))
+
+  if (videoRows.length < 2) return []
+
+  const relaxedThreshold = Math.max(
+    VIDEO_VISUAL_THRESHOLD_FLOOR,
+    threshold - VIDEO_VISUAL_THRESHOLD_DELTA
+  )
+  const parent = videoRows.map((_, index) => index)
+  const find = (index: number): number =>
+    parent[index] === index ? index : (parent[index] = find(parent[index]))
+  const union = (a: number, b: number) => {
+    const rootA = find(a)
+    const rootB = find(b)
+    if (rootA !== rootB) parent[rootA] = rootB
+  }
+
+  const sortedVideoRows = videoRows
+    .map((row, index) => ({ ...row, index }))
+    .sort((a, b) => (a.item.duration ?? 0) - (b.item.duration ?? 0))
+
+  for (let i = 0; i < videoRows.length; i++) {
+    const rowA = sortedVideoRows[i]
+    for (let j = i + 1; j < sortedVideoRows.length; j++) {
+      const rowB = sortedVideoRows[j]
+      if (
+        (rowB.item.duration ?? 0) - (rowA.item.duration ?? 0) >
+        VIDEO_DURATION_TOLERANCE_MS
+      ) {
+        break
+      }
+      if (!haveCloseVideoDuration(rowA.item, rowB.item)) continue
+      const a = rowA.embedding
+      const b = rowB.embedding
+      const dim = Math.min(a.length, b.length)
+      let dot = 0
+      for (let k = 0; k < dim; k++) dot += a[k] * b[k]
+      if (dot >= relaxedThreshold) union(rowA.index, rowB.index)
+    }
+  }
+
+  const components = new Map<number, GpdMediaItem[]>()
+  for (let i = 0; i < videoRows.length; i++) {
+    const root = find(i)
+    const component = components.get(root) ?? []
+    component.push(videoRows[i].item)
+    components.set(root, component)
+  }
+
+  return [...components.values()]
+    .filter((group) => group.length >= 2)
+    .map(sortGroupItems)
+}
+
+function videoMetadataKeys(item: GpdMediaItem): string[] {
+  if (!isVideo(item)) return []
+  const keys: string[] = []
+  const fileStem = normalizeFileStem(item.fileName)
+  if (item.resWidth && item.resHeight) {
+    const dimensionBase = `${item.duration}|${item.resWidth}x${item.resHeight}`
+    if (fileStem) keys.push(`video-name-dim|${dimensionBase}|${fileStem}`)
+    if (Number.isFinite(item.size) && (item.size ?? 0) > 0) {
+      keys.push(`video-size-dim|${dimensionBase}|${item.size}`)
+    }
+  }
+  if (fileStem) keys.push(`video-name-duration|${item.duration}|${fileStem}`)
+  if (Number.isFinite(item.size) && (item.size ?? 0) > 0) {
+    keys.push(`video-size-duration|${item.duration}|${item.size}`)
+  }
+  return keys
+}
+
+export function findVideoMetadataDuplicateGroups(
+  items: GpdMediaItem[]
+): GpdMediaItem[][] {
+  const buckets = new Map<string, GpdMediaItem[]>()
+  for (const item of items) {
+    for (const key of videoMetadataKeys(item)) {
+      const bucket = buckets.get(key) ?? []
+      bucket.push(item)
+      buckets.set(key, bucket)
+    }
+  }
+  return mergeDuplicateItemGroups(
+    [...buckets.values()].filter((group) => group.length >= 2)
+  )
+}
+
+export function mergeDuplicateItemGroups(
+  groups: GpdMediaItem[][]
+): GpdMediaItem[][] {
+  const itemByKey = new Map<string, GpdMediaItem>()
+  const parent = new Map<string, string>()
+
+  const find = (key: string): string => {
+    const current = parent.get(key) ?? key
+    if (current === key) return key
+    const root = find(current)
+    parent.set(key, root)
+    return root
+  }
+  const union = (a: string, b: string) => {
+    const rootA = find(a)
+    const rootB = find(b)
+    if (rootA !== rootB) parent.set(rootA, rootB)
+  }
+
+  for (const group of groups) {
+    const keys = group.map((item) => item.mediaKey)
+    for (const item of group) {
+      itemByKey.set(item.mediaKey, item)
+      if (!parent.has(item.mediaKey)) parent.set(item.mediaKey, item.mediaKey)
+    }
+    for (let i = 1; i < keys.length; i++) union(keys[0], keys[i])
+  }
+
+  const components = new Map<string, GpdMediaItem[]>()
+  for (const [key, item] of itemByKey) {
+    const root = find(key)
+    const component = components.get(root) ?? []
+    component.push(item)
+    components.set(root, component)
+  }
+
+  return [...components.values()]
+    .filter((group) => group.length >= 2)
+    .map(sortGroupItems)
+    .sort((a, b) => b.length - a.length)
+}
+
+export function smartScanEmbeddingCandidates(
+  candidates: GpdMediaItem[],
+  buckets: GpdMediaItem[][]
+): GpdMediaItem[] {
+  const seen = new Set<string>()
+  const subset: GpdMediaItem[] = []
+  const add = (item: GpdMediaItem) => {
+    if (seen.has(item.mediaKey)) return
+    seen.add(item.mediaKey)
+    subset.push(item)
+  }
+
+  for (const bucket of buckets) {
+    for (const item of bucket) add(item)
+  }
+  for (const item of candidates) {
+    if (isVideo(item)) add(item)
+  }
+
+  return subset
+}
+
 // ============================================================
 // Main entry points
 // ============================================================
@@ -109,6 +328,10 @@ export async function fullDetectDuplicates(
   // same clip have identical poster frames, which produce near-identical
   // embeddings.
   const candidates = mediaItems.filter((item) => item.thumb)
+  const exactMetadataGroups = mergeDuplicateItemGroups([
+    ...findDedupKeyDuplicateGroups(candidates),
+    ...findVideoMetadataDuplicateGroups(candidates)
+  ])
   console.log(
     `[GPD] detectDuplicates: ${mediaItems.length} items → ${candidates.length} candidates`
   )
@@ -196,6 +419,14 @@ export async function fullDetectDuplicates(
   await logger?.phaseComplete("computeEmbeddingsMs", computeEmbeddingsMs)
 
   if (embeddings.length < 2) {
+    if (exactMetadataGroups.length > 0) {
+      return {
+        groups: exactMetadataGroups.map((items, i) =>
+          buildDuplicateGroup(items, i, threshold)
+        ),
+        timing: emptyTiming({ cacheHits, fetchThumbnailsMs, computeEmbeddingsMs })
+      }
+    }
     if (candidates.length >= 2) {
       throw new Error(
         `Only ${embeddings.length} of ${candidates.length} candidate items could be processed. Check your Google Photos connection and retry.`
@@ -215,21 +446,20 @@ export async function fullDetectDuplicates(
   await new Promise<void>((r) => setTimeout(r, 0))
   const workerUrl = chrome.runtime.getURL("scripts/embedder-worker.js")
   const t3 = performance.now()
+  const videoPosterGroups = findVideoPosterDuplicateGroups(
+    candidates,
+    embeddings,
+    validIndices,
+    threshold
+  )
   const buildGroups = (indexGroups: number[][]): DuplicateGroup[] =>
-    indexGroups.map((indices, i) => {
-      // Sort items by upload date ascending so the oldest is first
-      const items = indices
-        .map((idx) => candidates[validIndices[idx]])
-        .sort((a, b) => (a.creationTimestamp ?? 0) - (b.creationTimestamp ?? 0))
-      const mediaKeys = items.map((item) => item.mediaKey)
-      return {
-        id: `group-${i}`,
-        mediaKeys,
-        originalMediaKey: selectDefaultKeep(items),
-        similarity: threshold, // Approximate; all items are at least this similar
-        ...classifyDuplicateItems(items)
-      }
-    })
+    mergeDuplicateItemGroups([
+      ...indexGroups.map((indices) =>
+        indices.map((idx) => candidates[validIndices[idx]])
+      ),
+      ...exactMetadataGroups,
+      ...videoPosterGroups
+    ]).map((items, i) => buildDuplicateGroup(items, i, threshold))
 
   const indexGroups = await runCommunityDetectionInWorker(
     embeddings,
@@ -472,23 +702,29 @@ export async function smartDetectDuplicates(
   // same clip have identical poster frames, which produce near-identical
   // embeddings.
   const candidates = mediaItems.filter((item) => item.thumb)
+  const exactMetadataGroups = mergeDuplicateItemGroups([
+    ...findDedupKeyDuplicateGroups(candidates),
+    ...findVideoMetadataDuplicateGroups(candidates)
+  ])
 
   // Step 1: Bucket by timestamp — no I/O, instant
   const buckets = groupByTimestamp(candidates, windowMs)
   console.log(
     `[GPD] smartDetectDuplicates: ${mediaItems.length} items → ${candidates.length} candidates → ${buckets.length} timestamp buckets`
   )
-  if (buckets.length === 0) return []
+  const subset = smartScanEmbeddingCandidates(candidates, buckets)
 
-  // Flatten to deduplicated subset
-  const seen = new Set<string>()
-  const subset: GpdMediaItem[] = []
-  for (const bucket of buckets)
-    for (const item of bucket)
-      if (!seen.has(item.mediaKey)) {
-        seen.add(item.mediaKey)
-        subset.push(item)
-      }
+  if (buckets.length === 0 && exactMetadataGroups.length > 0) {
+    return exactMetadataGroups.map((items, i) =>
+      buildDuplicateGroup(items, i, threshold)
+    )
+  }
+
+  if (subset.length < 2) {
+    return exactMetadataGroups.map((items, i) =>
+      buildDuplicateGroup(items, i, threshold)
+    )
+  }
 
   const keys = subset.map((item) => item.mediaKey)
 
@@ -553,6 +789,11 @@ export async function smartDetectDuplicates(
   await logger?.phaseComplete("computeEmbeddingsMs", computeEmbeddingsMs)
 
   if (embeddings.length < 2) {
+    if (exactMetadataGroups.length > 0) {
+      return exactMetadataGroups.map((items, i) =>
+        buildDuplicateGroup(items, i, threshold)
+      )
+    }
     if (subset.length >= 2) {
       throw new Error(
         `Only ${embeddings.length} of ${subset.length} candidate items could be processed. Check your Google Photos connection and retry.`
@@ -574,8 +815,19 @@ export async function smartDetectDuplicates(
     )
     .filter((b) => b.length >= 2)
   const workerTimestamps = validIndices.map((idx) => subset[idx].timestamp)
+  const videoPosterGroups = findVideoPosterDuplicateGroups(
+    subset,
+    embeddings,
+    validIndices,
+    threshold
+  )
 
-  if (workerBuckets.length === 0) return []
+  if (workerBuckets.length === 0) {
+    return mergeDuplicateItemGroups([
+      ...exactMetadataGroups,
+      ...videoPosterGroups
+    ]).map((items, i) => buildDuplicateGroup(items, i, threshold))
+  }
 
   // Offload pairwise comparison to worker
   trackedProgress({ phase: "detecting_duplicates", current: 0, total: 0 })
@@ -583,20 +835,13 @@ export async function smartDetectDuplicates(
   const workerUrl = chrome.runtime.getURL("scripts/embedder-worker.js")
   const t3 = performance.now()
   const buildGroups = (indexGroups: number[][]): DuplicateGroup[] =>
-    indexGroups
-      .map((indices, i) => {
-        const items = indices
-          .map((idx) => subset[validIndices[idx]])
-          .sort((a, b) => (a.creationTimestamp ?? 0) - (b.creationTimestamp ?? 0))
-        return {
-          id: `group-${i}`,
-          mediaKeys: items.map((x) => x.mediaKey),
-          originalMediaKey: selectDefaultKeep(items),
-          similarity: threshold,
-          ...classifyDuplicateItems(items)
-        }
-      })
-      .sort((a, b) => b.mediaKeys.length - a.mediaKeys.length)
+    mergeDuplicateItemGroups([
+      ...indexGroups.map((indices) =>
+        indices.map((idx) => subset[validIndices[idx]])
+      ),
+      ...exactMetadataGroups,
+      ...videoPosterGroups
+    ]).map((items, i) => buildDuplicateGroup(items, i, threshold))
 
   const indexGroups = await runSmartDetectionInWorker(
     embeddings,
@@ -663,7 +908,9 @@ async function fetchThumbnails(
       if (!entry) break
 
       try {
-        const url = entry.item.thumb + `=h${THUMB_HEIGHT}`
+        const url = entry.item.thumb.startsWith("data:")
+          ? entry.item.thumb
+          : entry.item.thumb + `=h${THUMB_HEIGHT}`
         const response = await fetch(url, {
           credentials: "include",
           signal: (
@@ -798,16 +1045,17 @@ export async function computeEmbeddings(
                 reject(new Error(e.data.message))
             }
             w.onerror = (e) => reject(new Error(e.message))
+            const workerModelBuffer = modelBuffer.slice(0)
             w.postMessage(
               {
                 type: "init",
                 data: {
                   wasmLoaderUrl,
                   wasmBinaryUrl,
-                  modelBuffer: modelBuffer.slice(0)
+                  modelBuffer: workerModelBuffer
                 }
               },
-              [modelBuffer.slice(0)] // transfer a clone; main thread keeps original for next worker
+              [workerModelBuffer] // transfer a clone; main thread keeps original for next worker
             )
           })
       )

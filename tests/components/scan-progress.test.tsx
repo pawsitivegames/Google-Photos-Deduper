@@ -50,10 +50,10 @@ function renderScanProgress(props: Props = {}) {
 describe("ScanProgress", () => {
   describe("phase labels", () => {
     const cases: [ScanPhase, string, number][] = [
-      ["fetching", "Fetching media items", 1],
-      ["downloading_thumbnails", "Downloading thumbnails", 2],
-      ["computing_embeddings", "Computing image similarity", 3],
-      ["detecting_duplicates", "Finding duplicate groups", 4],
+      ["fetching", "Reading your library", 1],
+      ["downloading_thumbnails", "Loading previews", 2],
+      ["computing_embeddings", "Comparing photos and videos", 3],
+      ["detecting_duplicates", "Preparing review sets", 4],
       ["complete", "Complete", 4]
     ]
 
@@ -82,21 +82,17 @@ describe("ScanProgress", () => {
 
     it("shows processed count only when totalEstimate is 0", () => {
       renderScanProgress({ itemsProcessed: 123, totalEstimate: 0 })
-      expect(screen.getByText("123 items processed")).toBeInTheDocument()
+      expect(screen.getByText("123 checked")).toBeInTheDocument()
     })
 
     it("shows processed / total when totalEstimate > 0", () => {
       renderScanProgress({ itemsProcessed: 300, totalEstimate: 1000 })
-      expect(
-        screen.getByText("300 items processed / 1,000")
-      ).toBeInTheDocument()
+      expect(screen.getByText("300 of 1,000 checked")).toBeInTheDocument()
     })
 
     it("formats large numbers with locale separators", () => {
       renderScanProgress({ itemsProcessed: 12345, totalEstimate: 50000 })
-      expect(
-        screen.getByText("12,345 items processed / 50,000")
-      ).toBeInTheDocument()
+      expect(screen.getByText("12,345 of 50,000 checked")).toBeInTheDocument()
     })
   })
 
@@ -184,9 +180,9 @@ describe("ScanProgress", () => {
   })
 
   describe("header", () => {
-    it("shows 'Scanning Library' heading", () => {
+    it("shows 'Finding Duplicates' heading", () => {
       renderScanProgress()
-      expect(screen.getByText("Scanning Library")).toBeInTheDocument()
+      expect(screen.getByText("Finding Duplicates")).toBeInTheDocument()
     })
   })
 })

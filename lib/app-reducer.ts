@@ -1,14 +1,14 @@
 // App state machine for Google Photos Deduper.
 // Extracted from tabs/app.tsx so it can be unit-tested independently.
 
-import type {
-  GpdMediaItem,
-  DuplicateGroup,
-  HealthCheckResultMessage,
-  GptkProgressMessage,
-  ScanPhase,
-} from "./types"
 import { areScanResultsValid } from "./scan-results"
+import type {
+  DuplicateGroup,
+  GpdMediaItem,
+  GptkProgressMessage,
+  HealthCheckResultMessage,
+  ScanPhase
+} from "./types"
 
 // ============================================================
 // Types
@@ -50,8 +50,18 @@ export type AppState =
 
 export type AppAction =
   | { type: "HEALTH_CHECK_RESULT"; payload: HealthCheckResultMessage }
-  | { type: "SCAN_STARTED"; requestId: string; hasGptk: boolean; accountEmail?: string }
-  | { type: "SCAN_PROGRESS"; payload: GptkProgressMessage; phase?: ScanPhase; totalItems?: number }
+  | {
+      type: "SCAN_STARTED"
+      requestId: string
+      hasGptk: boolean
+      accountEmail?: string
+    }
+  | {
+      type: "SCAN_PROGRESS"
+      payload: GptkProgressMessage
+      phase?: ScanPhase
+      totalItems?: number
+    }
   | { type: "SCAN_MEDIA_FETCHED"; mediaItems: GpdMediaItem[] }
   | {
       type: "SCAN_PARTIAL_RESULTS"
@@ -74,7 +84,7 @@ export type AppAction =
       groups: DuplicateGroup[]
       totalItems: number
     }
-  | { type: "TRASH_PROGRESS"; trashedSoFar: number }
+  | { type: "TRASH_PROGRESS"; trashedSoFar: number; trashedKeys?: string[] }
   | { type: "TRASH_COMPLETE"; trashedKeys: string[] }
   | { type: "TRASH_ERROR"; error: string }
   | {
@@ -104,22 +114,44 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         // Don't downgrade from results — just confirm GP is still available
         if (state.status === "results") {
           // Clear stale results when a different account is detected
-          if (!areScanResultsValid({ accountEmail: state.accountEmail }, { accountEmail: action.payload.accountEmail })) {
-            return { status: "connected", hasGptk: action.payload.hasGptk, accountEmail: action.payload.accountEmail }
+          if (
+            !areScanResultsValid(
+              { accountEmail: state.accountEmail },
+              { accountEmail: action.payload.accountEmail }
+            )
+          ) {
+            return {
+              status: "connected",
+              hasGptk: action.payload.hasGptk,
+              accountEmail: action.payload.accountEmail
+            }
           }
           const email = action.payload.accountEmail ?? state.accountEmail
           if (email === state.accountEmail) return state
           return { ...state, accountEmail: email }
         }
-        return { status: "connected", hasGptk: action.payload.hasGptk, accountEmail: action.payload.accountEmail }
+        return {
+          status: "connected",
+          hasGptk: action.payload.hasGptk,
+          accountEmail: action.payload.accountEmail
+        }
       }
       // Don't disconnect if already showing results — user can still view them
       // and GP tab will be required again only when they start a new scan/trash
       if (state.status === "results") return state
-      return {
-        status: "disconnected",
-        error:
-          "Cannot connect to Google Photos. Please open photos.google.com in another tab.",
+      {
+        const providerName =
+          action.payload.provider === "icloud"
+            ? "iCloud Photos"
+            : "Google Photos"
+        const providerUrl =
+          action.payload.provider === "icloud"
+            ? "icloud.com/photos"
+            : "photos.google.com"
+        return {
+          status: "disconnected",
+          error: `Cannot connect to ${providerName}. Please open ${providerUrl} in another tab.`
+        }
       }
 
     case "SCAN_STARTED":
@@ -131,7 +163,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         message: "Starting scan...",
         requestId: action.requestId,
         hasGptk: action.hasGptk,
-        accountEmail: action.accountEmail,
+        accountEmail: action.accountEmail
       }
 
     case "SCAN_PROGRESS":
@@ -145,8 +177,10 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         ...(action.phase !== undefined ? { phase: action.phase } : {}),
         itemsProcessed: action.payload.itemsProcessed,
-        ...(action.totalItems !== undefined ? { totalEstimate: action.totalItems } : {}),
-        message: action.payload.message || state.message,
+        ...(action.totalItems !== undefined
+          ? { totalEstimate: action.totalItems }
+          : {}),
+        message: action.payload.message || state.message
       }
 
     case "SCAN_MEDIA_FETCHED":
@@ -156,7 +190,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         phase: "downloading_thumbnails",
         itemsProcessed: 0,
         totalEstimate: action.mediaItems.length,
-        message: `Fetched ${action.mediaItems.length} items. Downloading thumbnails...`,
+        message: `Fetched ${action.mediaItems.length} items. Downloading thumbnails...`
       }
 
     case "SCAN_PARTIAL_RESULTS":
@@ -165,7 +199,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         partialMediaItems: action.mediaItems,
         partialGroups: action.groups,
-        partialTotalItems: action.totalItems,
+        partialTotalItems: action.totalItems
       }
 
     case "SCAN_COMPLETE":
@@ -174,7 +208,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         mediaItems: action.mediaItems,
         groups: action.groups,
         totalItems: action.totalItems,
-        accountEmail: "accountEmail" in state ? state.accountEmail : undefined,
+        accountEmail: "accountEmail" in state ? state.accountEmail : undefined
       }
 
     case "SCAN_ERROR":
@@ -182,7 +216,11 @@ export function appReducer(state: AppState, action: AppAction): AppState {
 
     case "SCAN_CANCELLED":
       if (state.status !== "scanning") return state
-      return { status: "connected", hasGptk: state.hasGptk, accountEmail: state.accountEmail }
+      return {
+        status: "connected",
+        hasGptk: state.hasGptk,
+        accountEmail: state.accountEmail
+      }
 
     case "TRASH_STARTED":
       return {
@@ -192,12 +230,31 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         totalItems: action.totalItems,
         totalToTrash: action.totalToTrash,
         trashedSoFar: 0,
-        accountEmail: "accountEmail" in state ? state.accountEmail : undefined,
+        accountEmail: "accountEmail" in state ? state.accountEmail : undefined
       }
 
     case "TRASH_PROGRESS":
       if (state.status !== "trashing") return state
-      return { ...state, trashedSoFar: action.trashedSoFar }
+      if (!action.trashedKeys?.length) {
+        return { ...state, trashedSoFar: action.trashedSoFar }
+      }
+      {
+        const trashedSet = new Set(action.trashedKeys)
+        const groups = state.groups
+          .map((group) => ({
+            ...group,
+            mediaKeys: group.mediaKeys.filter((key) => !trashedSet.has(key))
+          }))
+          .filter((group) => group.mediaKeys.length >= 2)
+        const mediaItems = { ...state.mediaItems }
+        for (const key of action.trashedKeys) delete mediaItems[key]
+        return {
+          ...state,
+          mediaItems,
+          groups,
+          trashedSoFar: action.trashedSoFar
+        }
+      }
 
     case "TRASH_COMPLETE": {
       if (state.status !== "trashing") return state
@@ -205,7 +262,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       const newGroups = state.groups
         .map((g) => ({
           ...g,
-          mediaKeys: g.mediaKeys.filter((k) => !trashedSet.has(k)),
+          mediaKeys: g.mediaKeys.filter((k) => !trashedSet.has(k))
         }))
         .filter((g) => g.mediaKeys.length >= 2)
 
@@ -219,7 +276,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         mediaItems: newMediaItems,
         groups: newGroups,
         totalItems: state.totalItems,
-        accountEmail: state.accountEmail,
+        accountEmail: state.accountEmail
       }
     }
 
@@ -232,7 +289,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         mediaItems: action.mediaItems,
         groups: action.groups,
         totalItems: action.totalItems,
-        accountEmail: action.accountEmail,
+        accountEmail: action.accountEmail
       }
 
     case "RESTORE_SNAPSHOT":
@@ -241,13 +298,14 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         mediaItems: action.mediaItems,
         groups: action.groups,
         totalItems: action.totalItems,
-        accountEmail: "accountEmail" in state ? state.accountEmail : undefined,
+        accountEmail: "accountEmail" in state ? state.accountEmail : undefined
       }
 
     case "GP_TAB_CLOSED":
       return {
         status: "disconnected",
-        error: "Google Photos tab was closed. Please reopen photos.google.com and retry.",
+        error:
+          "Google Photos tab was closed. Please reopen photos.google.com and retry."
       }
 
     case "RESET":

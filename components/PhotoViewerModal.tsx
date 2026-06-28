@@ -1,6 +1,12 @@
-import { useCallback, useState, useEffect } from "react"
 import { keyframes } from "@emotion/react"
+import ChevronLeftIcon from "@mui/icons-material/ChevronLeft"
+import ChevronRightIcon from "@mui/icons-material/ChevronRight"
+import CloseIcon from "@mui/icons-material/Close"
+import HelpOutlineIcon from "@mui/icons-material/HelpOutline"
+import OpenInNewIcon from "@mui/icons-material/OpenInNew"
+import PlayCircleFilledWhiteIcon from "@mui/icons-material/PlayCircleFilledWhite"
 import Box from "@mui/material/Box"
+import Button from "@mui/material/Button"
 import CardMedia from "@mui/material/CardMedia"
 import Chip from "@mui/material/Chip"
 import CircularProgress from "@mui/material/CircularProgress"
@@ -9,11 +15,8 @@ import DialogContent from "@mui/material/DialogContent"
 import IconButton from "@mui/material/IconButton"
 import Link from "@mui/material/Link"
 import Typography from "@mui/material/Typography"
-import ChevronLeftIcon from "@mui/icons-material/ChevronLeft"
-import ChevronRightIcon from "@mui/icons-material/ChevronRight"
-import CloseIcon from "@mui/icons-material/Close"
-import HelpOutlineIcon from "@mui/icons-material/HelpOutline"
-import OpenInNewIcon from "@mui/icons-material/OpenInNew"
+import { useCallback, useEffect, useState } from "react"
+
 import type { GpdMediaItem } from "../lib/types"
 
 /**
@@ -24,10 +27,25 @@ import type { GpdMediaItem } from "../lib/types"
  * Deps are the joined thumb URLs so the effect only re-runs when the group
  * actually changes, not on every render.
  */
-function useGroupBlobUrls(items: GpdMediaItem[]): Record<string, string | undefined> {
-  const [blobUrls, setBlobUrls] = useState<Record<string, string>>({})
+interface MediaBlob {
+  url: string
+  type: string
+}
 
-  const thumbKey = items.map((i) => i.thumb).join("|")
+function isVideoItem(item: GpdMediaItem): boolean {
+  return Number.isFinite(item.duration) && (item.duration ?? 0) > 0
+}
+
+function mediaFetchUrl(item: GpdMediaItem): string {
+  return isVideoItem(item) ? `${item.thumb}=dv` : item.thumb
+}
+
+function useGroupBlobUrls(
+  items: GpdMediaItem[]
+): Record<string, MediaBlob | undefined> {
+  const [blobUrls, setBlobUrls] = useState<Record<string, MediaBlob>>({})
+
+  const thumbKey = items.map((i) => mediaFetchUrl(i)).join("|")
 
   useEffect(() => {
     const controllers: AbortController[] = []
@@ -40,13 +58,19 @@ function useGroupBlobUrls(items: GpdMediaItem[]): Record<string, string | undefi
       const controller = new AbortController()
       controllers.push(controller)
 
-      fetch(item.thumb, { credentials: "include", signal: controller.signal })
+      fetch(mediaFetchUrl(item), {
+        credentials: "include",
+        signal: controller.signal
+      })
         .then((r) => (r.ok ? r.blob() : null))
         .then((blob) => {
           if (blob && !cancelled) {
             const url = URL.createObjectURL(blob)
             createdUrls.push(url)
-            setBlobUrls((prev) => ({ ...prev, [item.mediaKey]: url }))
+            setBlobUrls((prev) => ({
+              ...prev,
+              [item.mediaKey]: { url, type: blob.type }
+            }))
           }
         })
         .catch(() => {})
@@ -57,19 +81,22 @@ function useGroupBlobUrls(items: GpdMediaItem[]): Record<string, string | undefi
       controllers.forEach((c) => c.abort())
       createdUrls.forEach((url) => URL.revokeObjectURL(url))
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [thumbKey])
 
   return blobUrls
 }
 
-interface FullResImageProps {
+interface FullResMediaProps {
   item: GpdMediaItem
-  blobUrl: string | undefined
+  blob: MediaBlob | undefined
 }
 
-function FullResImage({ item, blobUrl }: FullResImageProps) {
-  if (!blobUrl) {
+function FullResMedia({ item, blob }: FullResMediaProps) {
+  const isVideo = isVideoItem(item)
+  const isPlayableVideo = isVideo && blob && !blob.type.startsWith("image/")
+
+  if (!blob) {
     return (
       <Box
         sx={{
@@ -77,23 +104,94 @@ function FullResImage({ item, blobUrl }: FullResImageProps) {
           alignItems: "center",
           justifyContent: "center",
           width: "100%",
-          height: "100%",
+          height: "100%"
         }}>
         <CircularProgress sx={{ color: "white" }} />
       </Box>
     )
   }
+
+  if (isPlayableVideo) {
+    return (
+      <Box
+        component="video"
+        src={blob.url}
+        controls
+        playsInline
+        preload="metadata"
+        aria-label={item.fileName ? `Play ${item.fileName}` : "Play video"}
+        sx={{
+          maxWidth: "100%",
+          maxHeight: "100%",
+          objectFit: "contain",
+          display: "block",
+          mx: "auto",
+          bgcolor: "black"
+        }}
+      />
+    )
+  }
+
+  if (isVideo) {
+    return (
+      <Box
+        sx={{
+          position: "relative",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          width: "100%",
+          height: "100%"
+        }}>
+        <CardMedia
+          component="img"
+          image={blob.url}
+          alt={item.fileName || item.mediaKey}
+          sx={{
+            maxWidth: "100%",
+            maxHeight: "100%",
+            objectFit: "contain",
+            display: "block",
+            mx: "auto",
+            opacity: item.productUrl ? 0.72 : 1
+          }}
+        />
+        {item.productUrl && (
+          <Button
+            component="a"
+            href={item.productUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            variant="contained"
+            startIcon={<PlayCircleFilledWhiteIcon />}
+            sx={{
+              position: "absolute",
+              left: "50%",
+              top: "50%",
+              transform: "translate(-50%, -50%)",
+              bgcolor: "rgba(255,255,255,0.94)",
+              color: "#111111",
+              boxShadow: "0 18px 44px rgba(0,0,0,0.35)",
+              "&:hover": { bgcolor: "white" }
+            }}>
+            Play in Google Photos
+          </Button>
+        )}
+      </Box>
+    )
+  }
+
   return (
     <CardMedia
       component="img"
-      image={blobUrl}
+      image={blob.url}
       alt={item.fileName || item.mediaKey}
       sx={{
         maxWidth: "100%",
         maxHeight: "100%",
         objectFit: "contain",
         display: "block",
-        mx: "auto",
+        mx: "auto"
       }}
     />
   )
@@ -131,7 +229,7 @@ export function PhotoViewerModal({
   onToggleKept,
   onToggleGroup,
   onNextGroup,
-  onPrevGroup,
+  onPrevGroup
 }: PhotoViewerModalProps) {
   const [index, setIndex] = useState(initialIndex)
   const [slideDir, setSlideDir] = useState<"forward" | "backward">("forward")
@@ -198,7 +296,17 @@ export function PhotoViewerModal({
     }
     window.addEventListener("keydown", handler)
     return () => window.removeEventListener("keydown", handler)
-  }, [open, index, items, keptSet, isGroupSelected, onToggleKept, onToggleGroup, onNextGroup, onPrevGroup])
+  }, [
+    open,
+    index,
+    items,
+    keptSet,
+    isGroupSelected,
+    onToggleKept,
+    onToggleGroup,
+    onNextGroup,
+    onPrevGroup
+  ])
 
   if (items.length === 0) return null
 
@@ -212,7 +320,7 @@ export function PhotoViewerModal({
     ? new Date(item.timestamp).toLocaleDateString(undefined, {
         year: "numeric",
         month: "short",
-        day: "numeric",
+        day: "numeric"
       })
     : null
 
@@ -220,7 +328,7 @@ export function PhotoViewerModal({
     ? new Date(item.creationTimestamp).toLocaleDateString(undefined, {
         year: "numeric",
         month: "short",
-        day: "numeric",
+        day: "numeric"
       })
     : null
 
@@ -233,11 +341,14 @@ export function PhotoViewerModal({
       aria-label="Photo viewer"
       PaperProps={{
         sx: {
-          bgcolor: "#111",
+          bgcolor: "rgba(17,17,17,0.96)",
           color: "white",
           position: "relative",
           overflow: "hidden",
-        },
+          borderRadius: 3,
+          backdropFilter: "saturate(180%) blur(24px)",
+          boxShadow: "0 28px 90px rgba(0,0,0,0.42)"
+        }
       }}>
       {/* Header bar: filename left, counter center, close right */}
       <Box
@@ -246,8 +357,9 @@ export function PhotoViewerModal({
           gridTemplateColumns: "1fr auto 1fr",
           alignItems: "center",
           px: 1,
-          py: 0.5,
-          borderBottom: "1px solid rgba(255,255,255,0.1)",
+          py: 0.75,
+          borderBottom: "1px solid rgba(255,255,255,0.12)",
+          bgcolor: "rgba(255,255,255,0.06)"
         }}>
         <Typography
           variant="caption"
@@ -266,7 +378,7 @@ export function PhotoViewerModal({
               color: "white",
               textAlign: "center",
               letterSpacing: "0.05em",
-              animation: `${slideDir === "forward" ? slideInFromRight : slideInFromLeft} 150ms ease-out`,
+              animation: `${slideDir === "forward" ? slideInFromRight : slideInFromLeft} 150ms ease-out`
             }}>
             {safeIndex + 1} / {items.length}
           </Typography>
@@ -291,9 +403,9 @@ export function PhotoViewerModal({
           alignItems: "center",
           justifyContent: "center",
           position: "relative",
-          bgcolor: "#111",
+          bgcolor: "#111111",
           height: "70vh",
-          overflow: "hidden",
+          overflow: "hidden"
         }}>
         {/* Previous */}
         <IconButton
@@ -304,12 +416,13 @@ export function PhotoViewerModal({
             position: "absolute",
             left: 8,
             color: "white",
-            bgcolor: "rgba(0,0,0,0.4)",
+            bgcolor: "rgba(255,255,255,0.14)",
             minWidth: 44,
             minHeight: 44,
             zIndex: 1,
-            "&:hover": { bgcolor: "rgba(0,0,0,0.65)" },
-            "&.Mui-disabled": { color: "rgba(255,255,255,0.2)" },
+            backdropFilter: "blur(14px)",
+            "&:hover": { bgcolor: "rgba(255,255,255,0.2)" },
+            "&.Mui-disabled": { color: "rgba(255,255,255,0.2)" }
           }}>
           <ChevronLeftIcon />
         </IconButton>
@@ -320,9 +433,9 @@ export function PhotoViewerModal({
             alignItems: "center",
             justifyContent: "center",
             width: "100%",
-            height: "100%",
+            height: "100%"
           }}>
-          <FullResImage item={item} blobUrl={blobUrls[item.mediaKey]} />
+          <FullResMedia item={item} blob={blobUrls[item.mediaKey]} />
         </Box>
 
         {/* Next */}
@@ -334,12 +447,13 @@ export function PhotoViewerModal({
             position: "absolute",
             right: 8,
             color: "white",
-            bgcolor: "rgba(0,0,0,0.4)",
+            bgcolor: "rgba(255,255,255,0.14)",
             minWidth: 44,
             minHeight: 44,
             zIndex: 1,
-            "&:hover": { bgcolor: "rgba(0,0,0,0.65)" },
-            "&.Mui-disabled": { color: "rgba(255,255,255,0.2)" },
+            backdropFilter: "blur(14px)",
+            "&:hover": { bgcolor: "rgba(255,255,255,0.2)" },
+            "&.Mui-disabled": { color: "rgba(255,255,255,0.2)" }
           }}>
           <ChevronRightIcon />
         </IconButton>
@@ -354,23 +468,33 @@ export function PhotoViewerModal({
           gap: 1.5,
           px: 2,
           py: 1.5,
-          borderTop: "1px solid rgba(255,255,255,0.1)",
+          borderTop: "1px solid rgba(255,255,255,0.12)",
+          bgcolor: "rgba(255,255,255,0.06)",
+          backdropFilter: "blur(18px)"
         }}>
         {/* Metadata */}
         <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap", flex: 1 }}>
           {item.resWidth && item.resHeight && (
-            <Typography variant="caption" sx={{ color: "rgba(255,255,255,0.6)", fontFamily: "monospace" }}>
+            <Typography
+              variant="caption"
+              sx={{ color: "rgba(255,255,255,0.6)", fontFamily: "monospace" }}>
               {item.resWidth}×{item.resHeight}
             </Typography>
           )}
           {takenDate && (
-            <Typography variant="caption" sx={{ color: "rgba(255,255,255,0.6)" }}>
-              <span style={{ opacity: 0.6 }}>Taken </span>{takenDate}
+            <Typography
+              variant="caption"
+              sx={{ color: "rgba(255,255,255,0.6)" }}>
+              <span style={{ opacity: 0.6 }}>Taken </span>
+              {takenDate}
             </Typography>
           )}
           {uploadedDate && (
-            <Typography variant="caption" sx={{ color: "rgba(255,255,255,0.6)" }}>
-              <span style={{ opacity: 0.6 }}>Uploaded </span>{uploadedDate}
+            <Typography
+              variant="caption"
+              sx={{ color: "rgba(255,255,255,0.6)" }}>
+              <span style={{ opacity: 0.6 }}>Uploaded </span>
+              {uploadedDate}
             </Typography>
           )}
         </Box>
@@ -382,7 +506,12 @@ export function PhotoViewerModal({
             size="small"
             color="primary"
             variant="outlined"
-            sx={{ height: 20, fontSize: 11, borderColor: "rgba(99,179,237,0.8)", color: "rgba(99,179,237,1)" }}
+            sx={{
+              height: 20,
+              fontSize: 11,
+              borderColor: "rgba(10,132,255,0.85)",
+              color: "rgba(100,210,255,1)"
+            }}
           />
         ) : isGroupSelected ? (
           <Chip
@@ -390,7 +519,12 @@ export function PhotoViewerModal({
             size="small"
             color="error"
             variant="outlined"
-            sx={{ height: 20, fontSize: 11, borderColor: "rgba(252,129,129,0.8)", color: "rgba(252,129,129,1)" }}
+            sx={{
+              height: 20,
+              fontSize: 11,
+              borderColor: "rgba(255,69,58,0.85)",
+              color: "rgba(255,105,97,1)"
+            }}
           />
         ) : null}
 
@@ -407,9 +541,9 @@ export function PhotoViewerModal({
               alignItems: "center",
               gap: 0.5,
               textDecoration: "none",
-              "&:hover": { color: "white" },
+              "&:hover": { color: "white" }
             }}>
-            View in Google Photos
+            {isVideoItem(item) ? "Play in Google Photos" : "View in Google Photos"}
             <OpenInNewIcon sx={{ fontSize: 12 }} />
           </Link>
         )}
@@ -419,7 +553,10 @@ export function PhotoViewerModal({
           onClick={() => setShortcutsOpen(true)}
           size="small"
           aria-label="Keyboard shortcuts"
-          sx={{ color: "rgba(255,255,255,0.7)", "&:hover": { color: "white" } }}>
+          sx={{
+            color: "rgba(255,255,255,0.7)",
+            "&:hover": { color: "white" }
+          }}>
           <HelpOutlineIcon sx={{ fontSize: 18 }} />
         </IconButton>
       </Box>
@@ -433,41 +570,92 @@ export function PhotoViewerModal({
         aria-label="Keyboard shortcuts"
         PaperProps={{
           sx: {
-            bgcolor: "#222",
+            bgcolor: "rgba(28,28,30,0.96)",
             color: "white",
-          },
+            borderRadius: 3,
+            backdropFilter: "saturate(180%) blur(24px)"
+          }
         }}>
-        <Box sx={{ p: 2, display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
-          <Typography variant="h6" sx={{ fontSize: "1.1rem" }}>Keyboard Shortcuts</Typography>
-          <IconButton onClick={() => setShortcutsOpen(false)} size="small" sx={{ color: "white" }}>
+        <Box
+          sx={{
+            p: 2,
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            borderBottom: "1px solid rgba(255,255,255,0.1)"
+          }}>
+          <Typography variant="h6" sx={{ fontSize: "1.1rem" }}>
+            Keyboard Shortcuts
+          </Typography>
+          <IconButton
+            onClick={() => setShortcutsOpen(false)}
+            size="small"
+            sx={{ color: "white" }}>
             <CloseIcon />
           </IconButton>
         </Box>
         <DialogContent sx={{ p: 0 }}>
-          <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5, p: 2 }}>
+          <Box
+            sx={{ display: "flex", flexDirection: "column", gap: 1.5, p: 2 }}>
             <Box sx={{ display: "flex", justifyContent: "space-between" }}>
-              <Typography variant="body2" sx={{ color: "rgba(255,255,255,0.7)" }}>Previous / Next photo</Typography>
-              <Typography variant="body2" sx={{ fontFamily: "monospace" }}>← / →</Typography>
+              <Typography
+                variant="body2"
+                sx={{ color: "rgba(255,255,255,0.7)" }}>
+                Previous / Next photo
+              </Typography>
+              <Typography variant="body2" sx={{ fontFamily: "monospace" }}>
+                ← / →
+              </Typography>
             </Box>
             <Box sx={{ display: "flex", justifyContent: "space-between" }}>
-              <Typography variant="body2" sx={{ color: "rgba(255,255,255,0.7)" }}>Keep photo</Typography>
-              <Typography variant="body2" sx={{ fontFamily: "monospace" }}>↑</Typography>
+              <Typography
+                variant="body2"
+                sx={{ color: "rgba(255,255,255,0.7)" }}>
+                Keep photo
+              </Typography>
+              <Typography variant="body2" sx={{ fontFamily: "monospace" }}>
+                ↑
+              </Typography>
             </Box>
             <Box sx={{ display: "flex", justifyContent: "space-between" }}>
-              <Typography variant="body2" sx={{ color: "rgba(255,255,255,0.7)" }}>Trash photo</Typography>
-              <Typography variant="body2" sx={{ fontFamily: "monospace" }}>↓</Typography>
+              <Typography
+                variant="body2"
+                sx={{ color: "rgba(255,255,255,0.7)" }}>
+                Trash photo
+              </Typography>
+              <Typography variant="body2" sx={{ fontFamily: "monospace" }}>
+                ↓
+              </Typography>
             </Box>
             <Box sx={{ display: "flex", justifyContent: "space-between" }}>
-              <Typography variant="body2" sx={{ color: "rgba(255,255,255,0.7)" }}>Previous / Next group</Typography>
-              <Typography variant="body2" sx={{ fontFamily: "monospace" }}>Shift + ← / →</Typography>
+              <Typography
+                variant="body2"
+                sx={{ color: "rgba(255,255,255,0.7)" }}>
+                Previous / Next group
+              </Typography>
+              <Typography variant="body2" sx={{ fontFamily: "monospace" }}>
+                Shift + ← / →
+              </Typography>
             </Box>
             <Box sx={{ display: "flex", justifyContent: "space-between" }}>
-              <Typography variant="body2" sx={{ color: "rgba(255,255,255,0.7)" }}>Confirm group's choices & Next</Typography>
-              <Typography variant="body2" sx={{ fontFamily: "monospace" }}>Shift + ↑</Typography>
+              <Typography
+                variant="body2"
+                sx={{ color: "rgba(255,255,255,0.7)" }}>
+                Confirm group's choices & Next
+              </Typography>
+              <Typography variant="body2" sx={{ fontFamily: "monospace" }}>
+                Shift + ↑
+              </Typography>
             </Box>
             <Box sx={{ display: "flex", justifyContent: "space-between" }}>
-              <Typography variant="body2" sx={{ color: "rgba(255,255,255,0.7)" }}>Unconfirm group</Typography>
-              <Typography variant="body2" sx={{ fontFamily: "monospace" }}>Shift + ↓</Typography>
+              <Typography
+                variant="body2"
+                sx={{ color: "rgba(255,255,255,0.7)" }}>
+                Unconfirm group
+              </Typography>
+              <Typography variant="body2" sx={{ fontFamily: "monospace" }}>
+                Shift + ↓
+              </Typography>
             </Box>
           </Box>
         </DialogContent>

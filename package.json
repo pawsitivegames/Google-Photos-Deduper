@@ -67,6 +67,7 @@
     ],
     "host_permissions": [
       "https://photos.google.com/*",
+      "https://www.icloud.com/*",
       "https://*.googleusercontent.com/*",
       "https://*.usercontent.google.com/*",
       "https://*.googleapis.com/*"
@@ -80,13 +81,15 @@
           "scripts/unsafewindow-shim.js",
           "scripts/google-photos-toolkit.user.js",
           "scripts/google-photos-commands.js",
+          "scripts/icloud-photos-commands.js",
           "scripts/vision_wasm_internal.js",
           "scripts/vision_wasm_internal.wasm",
           "scripts/embedder-worker.js",
           "scripts/mobilenet_v3_large.tflite"
         ],
         "matches": [
-          "https://photos.google.com/*"
+          "https://photos.google.com/*",
+          "https://www.icloud.com/*"
         ]
       }
     ]

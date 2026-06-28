@@ -230,6 +230,21 @@ describe("TRASH_PROGRESS", () => {
     if (next.status === "trashing") expect(next.trashedSoFar).toBe(250)
   })
 
+  it("removes confirmed moved keys while staying in trashing state", () => {
+    const next = appReducer(trashingState, {
+      type: "TRASH_PROGRESS",
+      trashedSoFar: 1,
+      trashedKeys: ["img2"]
+    })
+
+    expect(next.status).toBe("trashing")
+    if (next.status === "trashing") {
+      expect(next.trashedSoFar).toBe(1)
+      expect(next.mediaItems.img2).toBeUndefined()
+      expect(next.groups).toEqual([makeGroup("g2", "img3", "img4")])
+    }
+  })
+
   it("is a no-op outside trashing state", () => {
     const next = appReducer(resultsState, { type: "TRASH_PROGRESS", trashedSoFar: 250 })
     expect(next).toBe(resultsState)

@@ -3,11 +3,17 @@ import {
   blockPairCountForItems,
   communityDetection,
   computeEmbeddings,
+  findDedupKeyDuplicateGroups,
+  findVideoMetadataDuplicateGroups,
+  findVideoPosterDuplicateGroups,
   fullDetectDuplicates,
   groupByTimestamp,
   matMul,
+  mergeDuplicateItemGroups,
   selectDefaultKeep,
   shouldCompareSmartTimestamps,
+  smartScanEmbeddingCandidates,
+  smartDetectDuplicates,
   topK,
   withinGroupDuplicates,
 } from "../../lib/duplicate-detector"
@@ -177,11 +183,15 @@ describe("computeEmbeddings", () => {
       onmessage: ((event: MessageEvent) => void) | null = null
       onerror: ((event: ErrorEvent) => void) | null = null
       terminated = false
+      static initPayloadBuffer: ArrayBuffer | null = null
+      static initTransferBuffer: ArrayBuffer | null = null
 
       constructor(_url: string) {}
 
-      postMessage(message: { type: string }) {
+      postMessage(message: { type: string; data?: { modelBuffer?: ArrayBuffer } }, transfer?: Transferable[]) {
         if (message.type === "init") {
+          FailingWorker.initPayloadBuffer = message.data?.modelBuffer ?? null
+          FailingWorker.initTransferBuffer = transfer?.[0] as ArrayBuffer
           queueMicrotask(() => this.onmessage?.({ data: { type: "ready" } } as MessageEvent))
           return
         }
@@ -207,6 +217,8 @@ describe("computeEmbeddings", () => {
         new Set()
       )
     ).rejects.toThrow("worker crashed")
+
+    expect(FailingWorker.initPayloadBuffer).toBe(FailingWorker.initTransferBuffer)
 
     vi.stubGlobal("chrome", originalChrome)
     vi.stubGlobal("Worker", originalWorker)
@@ -401,6 +413,254 @@ describe("fullDetectDuplicates — candidate filtering", () => {
     ).rejects.toThrow(/Only 0 of 2 candidate items could be processed/)
 
     vi.stubGlobal("fetch", originalFetch)
+  })
+})
+
+describe("video metadata duplicate detection", () => {
+  it("groups exact matches by dedupKey even when visual metadata differs", () => {
+    const groups = findDedupKeyDuplicateGroups([
+      makeItem("a", 1000, 100, {
+        dedupKey: "same-dedup",
+        duration: 12_345,
+        resWidth: 1920,
+        resHeight: 1080,
+        fileName: "clip-a.mov"
+      }),
+      makeItem("b", 2000, 200, {
+        dedupKey: "same-dedup",
+        duration: 12_345,
+        resWidth: 1280,
+        resHeight: 720,
+        fileName: "clip-b.mp4"
+      })
+    ])
+
+    expect(groups).toHaveLength(1)
+    expect(groups[0].map((item) => item.mediaKey)).toEqual(["a", "b"])
+  })
+
+  it("groups videos with matching duration, dimensions, and filename even when upload dates differ", () => {
+    const groups = findVideoMetadataDuplicateGroups([
+      makeItem("old-upload", 1000, 100, {
+        duration: 12_345,
+        resWidth: 1920,
+        resHeight: 1080,
+        fileName: "IMG_1001.MOV"
+      }),
+      makeItem("new-upload", 2000, 200, {
+        duration: 12_345,
+        resWidth: 1920,
+        resHeight: 1080,
+        fileName: "img_1001.mp4"
+      })
+    ])
+
+    expect(groups).toHaveLength(1)
+    expect(groups[0].map((item) => item.mediaKey)).toEqual([
+      "old-upload",
+      "new-upload"
+    ])
+  })
+
+  it("groups videos with matching duration and filename stem when dimensions differ", () => {
+    const groups = findVideoMetadataDuplicateGroups([
+      makeItem("phone-copy", 1000, 100, {
+        duration: 12_345,
+        resWidth: 1920,
+        resHeight: 1080,
+        fileName: "IMG_1001.MOV"
+      }),
+      makeItem("cloud-copy", 2000, 200, {
+        duration: 12_345,
+        resWidth: 1280,
+        resHeight: 720,
+        fileName: "img_1001.mp4"
+      })
+    ])
+
+    expect(groups).toHaveLength(1)
+    expect(groups[0].map((item) => item.mediaKey)).toEqual([
+      "phone-copy",
+      "cloud-copy"
+    ])
+  })
+
+  it("groups videos with matching duration, dimensions, and file size when filename is unavailable", () => {
+    const groups = findVideoMetadataDuplicateGroups([
+      makeItem("a", 1000, 100, {
+        duration: 7000,
+        resWidth: 1280,
+        resHeight: 720,
+        size: 3_500_000
+      }),
+      makeItem("b", 2000, 200, {
+        duration: 7000,
+        resWidth: 1280,
+        resHeight: 720,
+        size: 3_500_000
+      })
+    ])
+
+    expect(groups).toHaveLength(1)
+    expect(groups[0].map((item) => item.mediaKey)).toEqual(["a", "b"])
+  })
+
+  it("groups videos with matching duration and file size when dimensions are unavailable", () => {
+    const groups = findVideoMetadataDuplicateGroups([
+      makeItem("a", 1000, 100, {
+        duration: 7000,
+        resWidth: undefined,
+        resHeight: undefined,
+        size: 3_500_000
+      }),
+      makeItem("b", 2000, 200, {
+        duration: 7000,
+        resWidth: undefined,
+        resHeight: undefined,
+        size: 3_500_000
+      })
+    ])
+
+    expect(groups).toHaveLength(1)
+    expect(groups[0].map((item) => item.mediaKey)).toEqual(["a", "b"])
+  })
+
+  it("does not group videos on duration and dimensions alone", () => {
+    const groups = findVideoMetadataDuplicateGroups([
+      makeItem("a", 1000, 100, {
+        duration: 7000,
+        resWidth: 1280,
+        resHeight: 720,
+        fileName: "first.mov",
+        size: 3_500_000
+      }),
+      makeItem("b", 2000, 200, {
+        duration: 7000,
+        resWidth: 1280,
+        resHeight: 720,
+        fileName: "second.mov",
+        size: 3_600_000
+      })
+    ])
+
+    expect(groups).toEqual([])
+  })
+
+  it("groups same-duration videos when poster embeddings are just below the photo threshold", () => {
+    const a = makeItem("a", 1000, 100, { duration: 7000 })
+    const b = makeItem("b", 2000, 200, { duration: 7200 })
+    const groups = findVideoPosterDuplicateGroups(
+      [a, b],
+      [
+        l2normalize(new Float32Array([1, 0, 0])),
+        l2normalize(new Float32Array([0.93, 0.37, 0]))
+      ],
+      [0, 1],
+      0.96
+    )
+
+    expect(groups).toHaveLength(1)
+    expect(groups[0].map((item) => item.mediaKey)).toEqual(["a", "b"])
+  })
+
+  it("does not group similar video posters when durations differ substantially", () => {
+    const a = makeItem("a", 1000, 100, { duration: 7000 })
+    const b = makeItem("b", 2000, 200, { duration: 12_000 })
+    const groups = findVideoPosterDuplicateGroups(
+      [a, b],
+      [
+        l2normalize(new Float32Array([1, 0, 0])),
+        l2normalize(new Float32Array([0.93, 0.37, 0]))
+      ],
+      [0, 1],
+      0.96
+    )
+
+    expect(groups).toEqual([])
+  })
+
+  it("keeps transitive video poster groups across duration-sorted windows", () => {
+    const a = makeItem("a", 1000, 100, { duration: 7000 })
+    const b = makeItem("b", 2000, 200, { duration: 7900 })
+    const c = makeItem("c", 3000, 300, { duration: 8800 })
+    const groups = findVideoPosterDuplicateGroups(
+      [c, a, b],
+      [
+        l2normalize(new Float32Array([0.93, 0.37, 0])),
+        l2normalize(new Float32Array([1, 0, 0])),
+        l2normalize(new Float32Array([0.98, 0.2, 0]))
+      ],
+      [0, 1, 2],
+      0.96
+    )
+
+    expect(groups).toHaveLength(1)
+    expect(groups[0].map((item) => item.mediaKey)).toEqual(["a", "b", "c"])
+  })
+
+  it("merges overlapping visual and video metadata groups", () => {
+    const a = makeItem("a", 1000, 100)
+    const b = makeItem("b", 2000, 200)
+    const c = makeItem("c", 3000, 300)
+
+    const groups = mergeDuplicateItemGroups([
+      [a, b],
+      [b, c]
+    ])
+
+    expect(groups).toHaveLength(1)
+    expect(groups[0].map((item) => item.mediaKey)).toEqual(["a", "b", "c"])
+  })
+
+  it("lets smart mode catch strong video metadata matches outside the time window", async () => {
+    const groups = await smartDetectDuplicates(
+      [
+        makeItem("old-upload", Date.parse("2021-01-01"), 100, {
+          duration: 12_345,
+          resWidth: 1920,
+          resHeight: 1080,
+          fileName: "IMG_1001.MOV"
+        }),
+        makeItem("new-upload", Date.parse("2024-01-01"), 200, {
+          duration: 12_345,
+          resWidth: 1920,
+          resHeight: 1080,
+          fileName: "img_1001.mp4"
+        })
+      ],
+      0.95,
+      1000
+    )
+
+    expect(groups).toHaveLength(1)
+    expect(groups[0].mediaKeys).toEqual(["old-upload", "new-upload"])
+    expect(groups[0].duplicateKind).toBe("exact")
+  })
+
+  it("keeps far-apart videos in the smart embedding subset for poster matching", () => {
+    const nearbyPhotoA = makeItem("photo-a", 1000)
+    const nearbyPhotoB = makeItem("photo-b", 1100)
+    const oldVideo = makeItem("old-video", Date.parse("2021-01-01"), 100, {
+      duration: 7000,
+      dedupKey: "old-video-dedup"
+    })
+    const newVideo = makeItem("new-video", Date.parse("2024-01-01"), 200, {
+      duration: 7100,
+      dedupKey: "new-video-dedup"
+    })
+    const farPhoto = makeItem("far-photo", Date.parse("2024-01-01"))
+
+    const subset = smartScanEmbeddingCandidates(
+      [nearbyPhotoA, nearbyPhotoB, oldVideo, newVideo, farPhoto],
+      [[nearbyPhotoA, nearbyPhotoB]]
+    )
+
+    expect(subset.map((item) => item.mediaKey)).toEqual([
+      "photo-a",
+      "photo-b",
+      "old-video",
+      "new-video"
+    ])
   })
 })
 

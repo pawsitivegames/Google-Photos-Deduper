@@ -4,6 +4,7 @@ import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded"
 import DownloadRoundedIcon from "@mui/icons-material/DownloadRounded"
 import RefreshRoundedIcon from "@mui/icons-material/RefreshRounded"
 import TuneRoundedIcon from "@mui/icons-material/TuneRounded"
+import Box from "@mui/material/Box"
 import Button from "@mui/material/Button"
 import Divider from "@mui/material/Divider"
 import Menu from "@mui/material/Menu"
@@ -59,42 +60,49 @@ export function ActionBar({
 
   return (
     <Paper
-      elevation={1}
+      elevation={0}
       sx={{
         position: "sticky",
-        top: 64, // below the AppBar (64px standard Toolbar height)
+        top: 80,
         zIndex: 9,
-        px: 3,
-        py: 1,
-        borderRadius: 0,
-        borderBottom: "1px solid",
+        px: { xs: 1.5, md: 2 },
+        py: 1.25,
+        mb: 2,
+        borderRadius: 3,
+        border: "1px solid",
         borderColor: "divider",
+        bgcolor: "rgba(255,255,255,0.78)",
+        backdropFilter: "saturate(180%) blur(24px)",
+        boxShadow: "0 18px 48px rgba(0, 0, 0, 0.08)",
         display: "flex",
         justifyContent: "space-between",
         alignItems: "center",
         flexWrap: "wrap",
         gap: 1.5
       }}>
-      <Stack
-        direction="row"
-        alignItems="center"
-        divider={<Divider orientation="vertical" flexItem />}
-        spacing={1.5}>
-        <Typography variant="body2" color="text.secondary">
-          {totalItems.toLocaleString()} items scanned
+      <Box sx={{ minWidth: { xs: "100%", sm: 240 } }}>
+        <Typography variant="subtitle2" fontWeight={700}>
+          {groupCount.toLocaleString()} duplicate set
+          {groupCount !== 1 ? "s" : ""} to review
         </Typography>
-        <Typography variant="body2" color="text.secondary">
-          {groupCount} duplicate group{groupCount !== 1 ? "s" : ""}
+        <Typography variant="caption" color="text.secondary">
+          {totalItems.toLocaleString()} photos and videos checked
+          {groupCount !== totalGroupCount ? " · " : ""}
+          {groupCount !== totalGroupCount && (
+            <Box component="span">
+              {totalGroupCount.toLocaleString()} sets total
+            </Box>
+          )}
         </Typography>
-        {groupCount !== totalGroupCount && (
-          <Typography variant="body2" color="text.secondary">
-            {totalGroupCount} total
-          </Typography>
-        )}
-      </Stack>
+      </Box>
 
       {totalGroupCount > 0 && (
-        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+        <Stack
+          direction="row"
+          spacing={0.75}
+          alignItems="center"
+          flexWrap="wrap"
+          useFlexGap>
           <ToggleButtonGroup
             value={reviewFilter}
             exclusive
@@ -104,10 +112,10 @@ export function ActionBar({
               if (value !== null) onReviewFilterChange(value)
             }}>
             <ToggleButton value="all">
-              All ({totalGroupCount.toLocaleString()})
+              All sets ({totalGroupCount.toLocaleString()})
             </ToggleButton>
             <ToggleButton value="exact">
-              Exact ({exactGroupCount.toLocaleString()})
+              Identical ({exactGroupCount.toLocaleString()})
             </ToggleButton>
             <ToggleButton value="similar">
               Similar ({similarGroupCount.toLocaleString()})
@@ -118,19 +126,19 @@ export function ActionBar({
             size="small"
             startIcon={<RefreshRoundedIcon />}
             onClick={onRescan}>
-            Re-scan
+            Scan again
           </Button>
           <Button
             size="small"
             startIcon={<DownloadRoundedIcon />}
             onClick={onExportJson}>
-            JSON
+            Export report
           </Button>
           <Button
             size="small"
             startIcon={<DownloadRoundedIcon />}
             onClick={onExportCsv}>
-            CSV
+            Spreadsheet
           </Button>
           <Divider orientation="vertical" flexItem sx={{ my: 0.5 }} />
           <Button
@@ -167,14 +175,14 @@ export function ActionBar({
             startIcon={<CheckBoxOutlinedIcon />}
             disabled={groupCount === 0}
             onClick={onSelectAll}>
-            Select All
+            Include all
           </Button>
           <Button
             size="small"
             startIcon={<CheckBoxOutlineBlankIcon />}
             disabled={groupCount === 0}
             onClick={onDeselectAll}>
-            Deselect All
+            Skip all
           </Button>
           <Divider orientation="vertical" flexItem sx={{ my: 0.5 }} />
           <Button

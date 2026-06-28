@@ -98,9 +98,9 @@ test("connects to Google Photos and completes a scan", async () => {
 
     // Wait for the app to be ready — either fresh or with saved results.
     const scanButton = appPage.getByRole("button", {
-      name: /Scan (Library|Album|Date Range)/i
+      name: /Check (entire library|this album|this date range)/i
     })
-    const rescanButton = appPage.getByRole("button", { name: "Re-scan" })
+    const rescanButton = appPage.getByRole("button", { name: "Scan again" })
 
     await expect(scanButton.or(rescanButton)).toBeVisible({ timeout: 15_000 })
 
@@ -119,18 +119,18 @@ test("connects to Google Photos and completes a scan", async () => {
     await scanButton.click()
 
     // Scanning progress should appear
-    await expect(appPage.getByText(/fetching/i)).toBeVisible({
+    await expect(appPage.getByText(/Reading your library/i)).toBeVisible({
       timeout: 10_000
     })
 
     // Wait for scan to complete (real libraries can take minutes)
-    await expect(appPage.getByText(/items scanned/)).toBeVisible({
+    await expect(appPage.getByText(/photos and videos checked/)).toBeVisible({
       timeout: 300_000
     })
 
     // Should show either results or no-duplicates state
     const hasDuplicates = await appPage
-      .getByText(/Duplicate Groups Found/)
+      .getByText(/Duplicate Sets Ready/)
       .isVisible()
     const hasNoDuplicates = await appPage
       .getByText("No duplicates found in your library.")

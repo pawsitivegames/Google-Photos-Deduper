@@ -1,8 +1,12 @@
+import CheckCircleRoundedIcon from "@mui/icons-material/CheckCircleRounded"
+import RadioButtonUncheckedRoundedIcon from "@mui/icons-material/RadioButtonUncheckedRounded"
 import Alert from "@mui/material/Alert"
 import Box from "@mui/material/Box"
 import Button from "@mui/material/Button"
 import CircularProgress from "@mui/material/CircularProgress"
 import LinearProgress from "@mui/material/LinearProgress"
+import Paper from "@mui/material/Paper"
+import Stack from "@mui/material/Stack"
 import Typography from "@mui/material/Typography"
 import { useEffect, useRef, useState } from "react"
 
@@ -18,10 +22,10 @@ interface ScanProgressProps {
 }
 
 const PHASE_LABELS: Record<ScanPhase, string> = {
-  fetching: "Fetching media items",
-  downloading_thumbnails: "Downloading thumbnails",
-  computing_embeddings: "Computing image similarity",
-  detecting_duplicates: "Finding duplicate groups",
+  fetching: "Reading your library",
+  downloading_thumbnails: "Loading previews",
+  computing_embeddings: "Comparing photos and videos",
+  detecting_duplicates: "Preparing review sets",
   complete: "Complete"
 }
 
@@ -113,66 +117,126 @@ export function ScanProgress({
   const stepNum = PHASE_STEP[phase]
 
   return (
-    <Box sx={{ maxWidth: 480, mx: "auto", p: 4 }}>
-      <Typography variant="h5" fontWeight={600} gutterBottom>
-        Scanning Library
-      </Typography>
-
-      {showIdleWarning && (
-        <Alert severity="warning" sx={{ mb: 2 }}>
-          No scan progress for {idleMinutes} minute
-          {idleMinutes === 1 ? "" : "s"}. The scan may still recover, but you
-          can pause and resume if it stays stuck.
-        </Alert>
-      )}
-
-      <Box
+    <Box sx={{ maxWidth: 860, mx: "auto", py: { xs: 2, md: 6 } }}>
+      <Paper
+        elevation={0}
         sx={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          mb: 2
+          p: { xs: 2.5, md: 4 },
+          border: "1px solid",
+          borderColor: "divider",
+          borderRadius: 3,
+          bgcolor: "rgba(255,255,255,0.78)",
+          backdropFilter: "saturate(180%) blur(22px)",
+          boxShadow: "0 24px 70px rgba(0, 0, 0, 0.08)"
         }}>
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-          <CircularProgress size={14} thickness={5} />
-          <Typography variant="body2" color="text.secondary">
-            {PHASE_LABELS[phase]}
-          </Typography>
-        </Box>
-        <Typography variant="caption" color="text.secondary">
-          Step {stepNum} of {TOTAL_STEPS}
+        <Typography variant="h5" gutterBottom>
+          Finding Duplicates
         </Typography>
-      </Box>
-
-      <LinearProgress
-        variant={isDeterminate ? "determinate" : "indeterminate"}
-        value={progress}
-        sx={{ mb: 1 }}
-      />
-
-      <Box sx={{ display: "flex", justifyContent: "space-between", mb: 2 }}>
-        <Typography variant="caption" color="text.secondary">
-          {itemsProcessed.toLocaleString()} items processed
-          {isDeterminate && ` / ${totalEstimate.toLocaleString()}`}
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+          Checking your library and preparing clear review sets.
         </Typography>
-        {isDeterminate && (
-          <Typography variant="caption" color="text.secondary">
-            {etaText ? `${progress}% · ${etaText}` : `${progress}%`}
-          </Typography>
+
+        {showIdleWarning && (
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            No scan progress for {idleMinutes} minute
+            {idleMinutes === 1 ? "" : "s"}. The scan may still recover, but you
+            can pause and resume if it stays stuck.
+          </Alert>
         )}
-      </Box>
 
-      {onPause && (
-        <Box sx={{ mt: 3 }}>
-          <Button
-            variant="outlined"
-            color="inherit"
-            size="small"
-            onClick={onPause}>
-            Pause Scan
-          </Button>
+        <Stack
+          direction={{ xs: "column", md: "row" }}
+          spacing={1}
+          sx={{ mb: 3 }}>
+          {(Object.keys(PHASE_STEP) as ScanPhase[])
+            .filter((step) => step !== "complete")
+            .map((step) => {
+              const complete =
+                PHASE_STEP[step] < stepNum || phase === "complete"
+              const active = step === phase
+              return (
+                <Box
+                  key={step}
+                  sx={{
+                    flex: 1,
+                    p: 1.25,
+                    border: "1px solid",
+                    borderColor: active ? "primary.main" : "divider",
+                    borderRadius: 2,
+                    bgcolor: active ? "primary.light" : "background.paper",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 1
+                  }}>
+                  {complete ? (
+                    <CheckCircleRoundedIcon color="success" fontSize="small" />
+                  ) : active ? (
+                    <CircularProgress size={16} thickness={5} />
+                  ) : (
+                    <RadioButtonUncheckedRoundedIcon
+                      color="disabled"
+                      fontSize="small"
+                    />
+                  )}
+                  <Typography variant="caption" fontWeight={700}>
+                    {PHASE_LABELS[step]}
+                  </Typography>
+                </Box>
+              )
+            })}
+        </Stack>
+
+        <Box
+          sx={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            mb: 2
+          }}>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+            <CircularProgress size={14} thickness={5} />
+            <Typography variant="body2" color="text.secondary">
+              {phase === "complete"
+                ? PHASE_LABELS[phase]
+                : `Current: ${PHASE_LABELS[phase]}`}
+            </Typography>
+          </Box>
+          <Typography variant="caption" color="text.secondary">
+            Step {stepNum} of {TOTAL_STEPS}
+          </Typography>
         </Box>
-      )}
+
+        <LinearProgress
+          variant={isDeterminate ? "determinate" : "indeterminate"}
+          value={progress}
+          sx={{ mb: 1 }}
+        />
+
+        <Box sx={{ display: "flex", justifyContent: "space-between", mb: 2 }}>
+          <Typography variant="caption" color="text.secondary">
+            {isDeterminate
+              ? `${itemsProcessed.toLocaleString()} of ${totalEstimate.toLocaleString()} checked`
+              : `${itemsProcessed.toLocaleString()} checked`}
+          </Typography>
+          {isDeterminate && (
+            <Typography variant="caption" color="text.secondary">
+              {etaText ? `${progress}% · ${etaText}` : `${progress}%`}
+            </Typography>
+          )}
+        </Box>
+
+        {onPause && (
+          <Box sx={{ mt: 3 }}>
+            <Button
+              variant="outlined"
+              color="inherit"
+              size="small"
+              onClick={onPause}>
+              Pause Scan
+            </Button>
+          </Box>
+        )}
+      </Paper>
     </Box>
   )
 }

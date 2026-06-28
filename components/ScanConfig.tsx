@@ -1,4 +1,5 @@
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore"
+import PhotoLibraryRoundedIcon from "@mui/icons-material/PhotoLibraryRounded"
 import SearchRoundedIcon from "@mui/icons-material/SearchRounded"
 import WarningAmberRoundedIcon from "@mui/icons-material/WarningAmberRounded"
 import Accordion from "@mui/material/Accordion"
@@ -79,40 +80,69 @@ export function ScanConfig({
 }: ScanConfigProps) {
   const dateRangeInvalid = isDateRangeInvalid(settings)
   const albumLabel = settings.albumScope?.title || settings.albumScope?.mediaKey
+  const sourceProvider = settings.sourceProvider ?? "google"
+  const isIcloud = sourceProvider === "icloud"
   const hasScanScope = Boolean(
     settings.albumScope || settings.dateRange?.from || settings.dateRange?.to
   )
   const showUnscopedFullScanWarning =
-    settings.scanMode === "full" && !hasScanScope
+    settings.scanMode === "full" && !hasScanScope && !isIcloud
 
   if (!hasGptk) {
     return (
       <Box sx={{ maxWidth: 480, mx: "auto", p: 4 }}>
         <Alert severity="warning" icon={<WarningAmberRoundedIcon />}>
-          GPTK is not loaded on the Google Photos page. Please reload
-          photos.google.com and try again.
+          {isIcloud
+            ? "iCloud Photos is not connected. Please open icloud.com/photos, sign in, and try again."
+            : "GPTK is not loaded on the Google Photos page. Please reload photos.google.com and try again."}
         </Alert>
       </Box>
     )
   }
 
   return (
-    <Box sx={{ maxWidth: 480, mx: "auto", p: 4 }}>
+    <Box sx={{ maxWidth: 900, mx: "auto", py: { xs: 2, md: 6 } }}>
       <Paper
         elevation={0}
         sx={{
-          p: 4,
+          p: { xs: 2.5, md: 4 },
           border: "1px solid",
           borderColor: "divider",
-          borderRadius: 2
+          borderRadius: 3,
+          bgcolor: "rgba(255,255,255,0.78)",
+          backdropFilter: "saturate(180%) blur(22px)",
+          boxShadow: "0 24px 70px rgba(0, 0, 0, 0.08)"
         }}>
-        <Typography variant="h5" fontWeight={600} gutterBottom>
-          Scan for Duplicates
-        </Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 4 }}>
-          Scan your Google Photos library to find duplicate images using
-          AI-powered image comparison.
-        </Typography>
+        <Box
+          sx={{
+            display: "flex",
+            flexDirection: { xs: "column", md: "row" },
+            gap: 3,
+            mb: 3
+          }}>
+          <Box
+            sx={{
+              width: 56,
+              height: 56,
+              borderRadius: 3,
+              bgcolor: "primary.light",
+              color: "primary.main",
+              display: "grid",
+              placeItems: "center",
+              flexShrink: 0
+            }}>
+            <PhotoLibraryRoundedIcon />
+          </Box>
+          <Box sx={{ flex: 1 }}>
+            <Typography variant="h5" gutterBottom>
+              Scan for Duplicates
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Choose where to look and how closely photos should match before
+              review begins.
+            </Typography>
+          </Box>
+        </Box>
 
         {resumeCheckpoint && (
           <Alert
@@ -139,7 +169,7 @@ export function ScanConfig({
             onClick={onResumeScan}
             disabled={dateRangeInvalid}
             sx={{ mb: 2 }}>
-            Resume Scan
+            Continue previous scan
           </Button>
         )}
 
@@ -151,12 +181,22 @@ export function ScanConfig({
           onClick={() => onStartScan()}
           disabled={dateRangeInvalid}
           sx={{ mb: 2 }}>
-          {settings.albumScope
-            ? "Scan Album"
-            : settings.dateRange?.from || settings.dateRange?.to
-              ? "Scan Date Range"
-              : "Scan Library"}
+          {isIcloud
+            ? "Check loaded iCloud photos"
+            : settings.albumScope
+              ? "Check this album"
+              : settings.dateRange?.from || settings.dateRange?.to
+                ? "Check this date range"
+                : "Check entire library"}
         </Button>
+
+        {isIcloud && (
+          <Alert severity="info" sx={{ mb: 2 }}>
+            iCloud support scans media currently loaded in the iCloud Photos web
+            page. Scroll the iCloud library to load more items before scanning.
+            Trash and restore actions remain Google Photos-only.
+          </Alert>
+        )}
 
         {showUnscopedFullScanWarning && (
           <Alert severity="warning" sx={{ mb: 2 }}>
@@ -180,7 +220,8 @@ export function ScanConfig({
           sx={{
             border: "1px solid",
             borderColor: "divider",
-            borderRadius: 1,
+            borderRadius: 2,
+            bgcolor: "rgba(255,255,255,0.58)",
             "&:before": { display: "none" }
           }}>
           <AccordionSummary expandIcon={<ExpandMoreIcon />}>
@@ -191,7 +232,30 @@ export function ScanConfig({
           <AccordionDetails>
             <Box sx={{ mb: 3 }}>
               <Typography variant="body2" fontWeight={500} sx={{ mb: 1 }}>
-                Scan mode
+                Photo source
+              </Typography>
+              <ToggleButtonGroup
+                value={sourceProvider}
+                exclusive
+                size="small"
+                fullWidth
+                onChange={(_, value) => {
+                  if (value !== null) {
+                    onSettingsChange({
+                      sourceProvider: value,
+                      albumScope:
+                        value === "icloud" ? undefined : settings.albumScope
+                    })
+                  }
+                }}>
+                <ToggleButton value="google">Google Photos</ToggleButton>
+                <ToggleButton value="icloud">iCloud Photos</ToggleButton>
+              </ToggleButtonGroup>
+            </Box>
+
+            <Box sx={{ mb: 3 }}>
+              <Typography variant="body2" fontWeight={500} sx={{ mb: 1 }}>
+                How broad should the search be?
               </Typography>
               <ToggleButtonGroup
                 value={settings.scanMode}
@@ -209,7 +273,7 @@ export function ScanConfig({
                 color="text.secondary"
                 sx={{ display: "block", mt: 0.5 }}>
                 {settings.scanMode === "smart"
-                  ? "Only compares photos taken at the same time — fast for large libraries."
+                  ? "Fast: compares photos and videos taken around the same time."
                   : `Compares all photos against each other in ${FULL_SCAN_BLOCK_SIZE.toLocaleString()}-item blocks.`}
               </Typography>
             </Box>
@@ -239,85 +303,86 @@ export function ScanConfig({
                   variant="caption"
                   color="text.secondary"
                   sx={{ display: "block", mt: 0.5 }}>
-                  How close in time items must be to be compared. Widen this to
-                  catch re-saved videos whose EXIF date was rewritten — at the
-                  cost of more pairs to check.
+                  How close in time photos and videos must be to be compared.
+                  Widen this to catch re-saved files whose taken date changed.
                 </Typography>
+              </Box>
+            )}
+
+            {!isIcloud && (
+              <Box sx={{ mb: 3 }}>
+                <Typography variant="body2" fontWeight={500} sx={{ mb: 1 }}>
+                  Where should we look?
+                </Typography>
+                <TextField
+                  select
+                  label="Library area"
+                  size="small"
+                  fullWidth
+                  value={settings.albumScope?.mediaKey ?? ""}
+                  helperText={
+                    albumLabel
+                      ? `Only checking ${albumLabel}.`
+                      : "Use the full library timeline."
+                  }
+                  onChange={(event) => {
+                    const mediaKey = event.target.value
+                    if (!mediaKey) {
+                      onSettingsChange({ albumScope: undefined })
+                      return
+                    }
+                    const album = albums.find((a) => a.mediaKey === mediaKey)
+                    onSettingsChange({
+                      albumScope: {
+                        mediaKey,
+                        title: album?.title,
+                        itemCount: album?.itemCount,
+                        isShared: album?.isShared
+                      }
+                    })
+                  }}>
+                  <MenuItem value="">Entire library timeline</MenuItem>
+                  {albums.map((album) => (
+                    <MenuItem key={album.mediaKey} value={album.mediaKey}>
+                      {album.title}
+                      {album.itemCount !== undefined
+                        ? ` (${album.itemCount.toLocaleString()})`
+                        : ""}
+                      {album.isShared ? " - shared" : ""}
+                    </MenuItem>
+                  ))}
+                </TextField>
+                <Box
+                  sx={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    mt: 1
+                  }}>
+                  <Typography variant="caption" color="text.secondary">
+                    {albumsLoading
+                      ? "Loading albums..."
+                      : albumsError
+                        ? albumsError
+                        : `${albums.length.toLocaleString()} album${
+                            albums.length !== 1 ? "s" : ""
+                          } available.`}
+                  </Typography>
+                  {onRefreshAlbums && (
+                    <Button
+                      size="small"
+                      disabled={albumsLoading}
+                      onClick={onRefreshAlbums}>
+                      Refresh
+                    </Button>
+                  )}
+                </Box>
               </Box>
             )}
 
             <Box sx={{ mb: 3 }}>
               <Typography variant="body2" fontWeight={500} sx={{ mb: 1 }}>
-                Album
-              </Typography>
-              <TextField
-                select
-                label="Album"
-                size="small"
-                fullWidth
-                value={settings.albumScope?.mediaKey ?? ""}
-                helperText={
-                  albumLabel
-                    ? `Scanning only ${albumLabel}.`
-                    : "Leave blank to scan the library timeline."
-                }
-                onChange={(event) => {
-                  const mediaKey = event.target.value
-                  if (!mediaKey) {
-                    onSettingsChange({ albumScope: undefined })
-                    return
-                  }
-                  const album = albums.find((a) => a.mediaKey === mediaKey)
-                  onSettingsChange({
-                    albumScope: {
-                      mediaKey,
-                      title: album?.title,
-                      itemCount: album?.itemCount,
-                      isShared: album?.isShared
-                    }
-                  })
-                }}>
-                <MenuItem value="">Library timeline</MenuItem>
-                {albums.map((album) => (
-                  <MenuItem key={album.mediaKey} value={album.mediaKey}>
-                    {album.title}
-                    {album.itemCount !== undefined
-                      ? ` (${album.itemCount.toLocaleString()})`
-                      : ""}
-                    {album.isShared ? " - shared" : ""}
-                  </MenuItem>
-                ))}
-              </TextField>
-              <Box
-                sx={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  mt: 1
-                }}>
-                <Typography variant="caption" color="text.secondary">
-                  {albumsLoading
-                    ? "Loading albums..."
-                    : albumsError
-                      ? albumsError
-                      : `${albums.length.toLocaleString()} album${
-                          albums.length !== 1 ? "s" : ""
-                        } available.`}
-                </Typography>
-                {onRefreshAlbums && (
-                  <Button
-                    size="small"
-                    disabled={albumsLoading}
-                    onClick={onRefreshAlbums}>
-                    Refresh
-                  </Button>
-                )}
-              </Box>
-            </Box>
-
-            <Box sx={{ mb: 3 }}>
-              <Typography variant="body2" fontWeight={500} sx={{ mb: 1 }}>
-                Taken date range
+                Optional taken-date range
               </Typography>
               <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
                 <TextField
@@ -360,7 +425,7 @@ export function ScanConfig({
                   mt: 1
                 }}>
                 <Typography variant="caption" color="text.secondary">
-                  Leave blank to scan every taken date.
+                  Leave blank to check every taken date.
                 </Typography>
                 {(settings.dateRange?.from || settings.dateRange?.to) && (
                   <Button
@@ -374,7 +439,7 @@ export function ScanConfig({
 
             <Box>
               <Typography variant="body2" fontWeight={500} sx={{ mb: 1 }}>
-                Similarity Threshold:{" "}
+                Match sensitivity:{" "}
                 <strong>{settings.similarityThreshold}</strong>
               </Typography>
               <Slider
@@ -404,8 +469,8 @@ export function ScanConfig({
                 variant="caption"
                 color="text.secondary"
                 sx={{ display: "block", mt: 1 }}>
-                Lower values catch more reuploads and edited copies; review
-                similar groups before trashing.
+                Lower values catch more reuploads and edited copies. Review
+                similar sets before trashing.
               </Typography>
             </Box>
 

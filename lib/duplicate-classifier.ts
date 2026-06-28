@@ -18,6 +18,12 @@ function presentValues<T>(
     .filter((value): value is T => value !== undefined && value !== null)
 }
 
+function fileStem(fileName: string | undefined): string | undefined {
+  const normalized = fileName?.trim().toLowerCase()
+  if (!normalized) return undefined
+  return normalized.replace(/\.[a-z0-9]{1,8}$/i, "")
+}
+
 export function classifyDuplicateItems(
   items: GpdMediaItem[]
 ): DuplicateClassification {
@@ -31,6 +37,10 @@ export function classifyDuplicateItems(
   const fileNames = presentValues(items, (item) => item.fileName)
   if (fileNames.length === items.length && allSame(fileNames)) {
     reasons.push("same filename")
+  }
+  const fileStems = presentValues(items, (item) => fileStem(item.fileName))
+  if (fileStems.length === items.length && allSame(fileStems)) {
+    reasons.push("same filename stem")
   }
 
   const dimensions = items
@@ -54,15 +64,32 @@ export function classifyDuplicateItems(
     reasons.push("same file size")
   }
 
+  const durations = presentValues(items, (item) => item.duration)
+  if (durations.length === items.length && allSame(durations)) {
+    reasons.push("same duration")
+  }
+
   const exactByDedupKey = reasons.includes("same dedupKey")
   const exactByMetadata =
     reasons.includes("same filename") &&
     reasons.includes("same dimensions") &&
     reasons.includes("same taken date") &&
     (sizes.length === 0 || reasons.includes("same file size"))
+  const exactVideoByMetadata =
+    durations.length === items.length &&
+    reasons.includes("same duration") &&
+    (reasons.includes("same filename") ||
+      reasons.includes("same filename stem") ||
+      reasons.includes("same file size")) &&
+    (reasons.includes("same dimensions") ||
+      reasons.includes("same filename stem") ||
+      reasons.includes("same file size"))
 
   return {
-    duplicateKind: exactByDedupKey || exactByMetadata ? "exact" : "similar",
+    duplicateKind:
+      exactByDedupKey || exactByMetadata || exactVideoByMetadata
+        ? "exact"
+        : "similar",
     matchReasons: reasons
   }
 }

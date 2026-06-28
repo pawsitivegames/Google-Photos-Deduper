@@ -103,12 +103,12 @@ test("restores saved scan results from storage on load", async () => {
 
   const page = await openAppTab(context, extensionId)
 
-  await expect(page.getByText("2 Duplicate Groups Found")).toBeVisible({
+  await expect(page.getByText("2 Duplicate Sets Ready")).toBeVisible({
     timeout: 5000
   })
-  await expect(page.getByText("4 items scanned")).toBeVisible()
+  await expect(page.getByText("4 photos and videos checked")).toBeVisible()
   await expect(
-    page.getByText("2 duplicate groups", { exact: true }).first()
+    page.getByText("2 duplicate sets to review", { exact: true }).first()
   ).toBeVisible()
 
   await page.close()
@@ -186,10 +186,10 @@ test("filters review groups by exact and similar classification", async () => {
   await expect(page.getByText("Exact duplicate")).toBeVisible({ timeout: 5000 })
   await expect(page.getByText("Similar", { exact: true })).toBeVisible()
 
-  await page.getByRole("button", { name: /Exact \(1\)/i }).click()
+  await page.getByRole("button", { name: /Identical \(1\)/i }).click()
   await expect(page.getByText("Exact duplicate")).toBeVisible()
   await expect(page.getByText("Similar", { exact: true })).not.toBeVisible()
-  await expect(page.getByText("2 total")).toBeVisible()
+  await expect(page.getByText("2 sets total")).toBeVisible()
 
   await page.getByRole("button", { name: /Similar \(1\)/i }).click()
   await expect(page.getByText("Similar", { exact: true })).toBeVisible()
@@ -231,17 +231,19 @@ test("clears saved results and selections when a different Google account is det
   await expect(page.getByText("Scan for Duplicates")).toBeVisible({
     timeout: 8_000
   })
-  await expect(page.getByText("1 Duplicate Group Found")).not.toBeVisible()
+  await expect(page.getByText("1 Duplicate Set Ready")).not.toBeVisible()
 
   const sw = context.serviceWorkers()[0]
-  const stored = await sw.evaluate(
-    () =>
-      new Promise<Record<string, unknown>>((resolve) => {
-        chrome.storage.local.get(["scanResults", "selections"], resolve)
-      })
-  )
-  expect(stored.scanResults).toBeUndefined()
-  expect(stored.selections).toBeUndefined()
+  await expect
+    .poll(() =>
+      sw.evaluate(
+        () =>
+          new Promise<Record<string, unknown>>((resolve) => {
+            chrome.storage.local.get(["scanResults", "selections"], resolve)
+          })
+      )
+    )
+    .toEqual({})
 
   await page.close()
   await stub.close()
@@ -280,17 +282,19 @@ test("clears legacy saved results when the current Google account is known", asy
   await expect(page.getByText("Scan for Duplicates")).toBeVisible({
     timeout: 8_000
   })
-  await expect(page.getByText("1 Duplicate Group Found")).not.toBeVisible()
+  await expect(page.getByText("1 Duplicate Set Ready")).not.toBeVisible()
 
   const sw = context.serviceWorkers()[0]
-  const stored = await sw.evaluate(
-    () =>
-      new Promise<Record<string, unknown>>((resolve) => {
-        chrome.storage.local.get(["scanResults", "selections"], resolve)
-      })
-  )
-  expect(stored.scanResults).toBeUndefined()
-  expect(stored.selections).toBeUndefined()
+  await expect
+    .poll(() =>
+      sw.evaluate(
+        () =>
+          new Promise<Record<string, unknown>>((resolve) => {
+            chrome.storage.local.get(["scanResults", "selections"], resolve)
+          })
+      )
+    )
+    .toEqual({})
 
   await page.close()
   await stub.close()
@@ -338,7 +342,7 @@ test("migrates untouched old smart defaults to full scan", async () => {
     "aria-pressed",
     "true"
   )
-  await expect(page.getByText(/Similarity Threshold:/i)).toContainText("0.95")
+  await expect(page.getByText(/Match sensitivity:/i)).toContainText("0.95")
 
   await page.close()
   await gpPage.close()
@@ -372,7 +376,7 @@ test("preserves intentional strict similarity settings", async () => {
     "aria-pressed",
     "true"
   )
-  await expect(page.getByText(/Similarity Threshold:/i)).toContainText("0.99")
+  await expect(page.getByText(/Match sensitivity:/i)).toContainText("0.99")
 
   await page.close()
   await gpPage.close()
@@ -414,9 +418,9 @@ test("offers resume when a previous scan checkpoint was interrupted", async () =
 
   const page = await openAppTab(context, extensionId)
 
-  await expect(page.getByRole("button", { name: /Resume Scan/i })).toBeVisible({
-    timeout: 5000
-  })
+  await expect(
+    page.getByRole("button", { name: /Continue previous scan/i })
+  ).toBeVisible({ timeout: 5000 })
   await expect(page.getByText(/Previous smart scan/i)).toContainText(
     "2024-01-01 to 2024-12-31"
   )
@@ -460,7 +464,7 @@ test("clears resumable checkpoint when a different Google account is detected", 
     timeout: 8_000
   })
   await expect(
-    page.getByRole("button", { name: /Resume Scan/i })
+    page.getByRole("button", { name: /Continue previous scan/i })
   ).not.toBeVisible()
 
   const sw = context.serviceWorkers()[0]
@@ -504,7 +508,7 @@ test("resumes duplicate detection from a checkpointed media list without refetch
   await expect(page.getByText(/Fetched media list \(2 items\)/i)).toBeVisible({
     timeout: 5000
   })
-  await page.getByRole("button", { name: /Resume Scan/i }).click()
+  await page.getByRole("button", { name: /Continue previous scan/i }).click()
   await expect(page.getByText(/No duplicates found/i)).toBeVisible({
     timeout: 10_000
   })
@@ -535,11 +539,13 @@ test("loads albums and allows choosing an album scan scope", async () => {
   await expect(page.getByText(/2 albums available/i)).toBeVisible({
     timeout: 5000
   })
-  await page.getByRole("combobox", { name: /Album/i }).click()
+  await page.getByRole("combobox", { name: /Library area/i }).click()
   await page.getByRole("option", { name: /Tiny test album/i }).click()
 
-  await expect(page.getByRole("button", { name: /Scan Album/i })).toBeVisible()
-  await expect(page.getByText(/Scanning only Tiny test album/i)).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: /Check this album/i })
+  ).toBeVisible()
+  await expect(page.getByText(/Only checking Tiny test album/i)).toBeVisible()
 
   await page.close()
   await gpPage.close()
@@ -655,7 +661,7 @@ test("persists group selections through page reload", async () => {
   await injectSelections(context, ["g1", "g3"], {})
 
   const page = await openAppTab(context, extensionId)
-  await expect(page.getByText("3 Duplicate Groups Found")).toBeVisible({
+  await expect(page.getByText("3 Duplicate Sets Ready")).toBeVisible({
     timeout: 5000
   })
 
@@ -665,7 +671,7 @@ test("persists group selections through page reload", async () => {
   await expect(checkboxes.nth(2)).toBeChecked() // g3 selected
 
   await page.reload()
-  await expect(page.getByText("3 Duplicate Groups Found")).toBeVisible({
+  await expect(page.getByText("3 Duplicate Sets Ready")).toBeVisible({
     timeout: 5000
   })
   await expect(checkboxes.nth(0)).toBeChecked()
@@ -711,11 +717,11 @@ test("re-scan clears saved results, selections, and resumable checkpoint", async
   })
 
   const page = await openAppTab(context, extensionId)
-  await expect(page.getByText("1 Duplicate Group Found")).toBeVisible({
+  await expect(page.getByText("1 Duplicate Set Ready")).toBeVisible({
     timeout: 5_000
   })
 
-  await page.getByRole("button", { name: /Re-scan/i }).click()
+  await page.getByRole("button", { name: /Scan again/i }).click()
   await expect(page.getByText("Scan for Duplicates")).toBeVisible({
     timeout: 8_000
   })
@@ -738,7 +744,7 @@ test("re-scan clears saved results, selections, and resumable checkpoint", async
   await expect(page.getByText("Scan for Duplicates")).toBeVisible({
     timeout: 8_000
   })
-  await expect(page.getByText("1 Duplicate Group Found")).not.toBeVisible()
+  await expect(page.getByText("1 Duplicate Set Ready")).not.toBeVisible()
 
   await page.close()
   await gpPage.close()
@@ -763,7 +769,7 @@ test("persists kept overrides through page reload", async () => {
   await injectSelections(context, ["g1"], { g1: ["key2"] })
 
   const page = await openAppTab(context, extensionId)
-  await expect(page.getByText("1 Duplicate Group Found")).toBeVisible({
+  await expect(page.getByText("1 Duplicate Set Ready")).toBeVisible({
     timeout: 5000
   })
 
@@ -773,11 +779,67 @@ test("persists kept overrides through page reload", async () => {
   await expect(cards.nth(1)).toContainText("Keep") // key2 — kept
 
   await page.reload()
-  await expect(page.getByText("1 Duplicate Group Found")).toBeVisible({
+  await expect(page.getByText("1 Duplicate Set Ready")).toBeVisible({
     timeout: 5000
   })
   await expect(cards.nth(0)).not.toContainText("Keep")
   await expect(cards.nth(1)).toContainText("Keep")
+
+  await page.close()
+  await clearStorage(context)
+})
+
+test("persists trash-all copy choices through page reload", async () => {
+  await injectScanResults(
+    context,
+    [
+      {
+        id: "g1",
+        mediaKeys: ["key1", "key2"],
+        originalMediaKey: "key1",
+        similarity: 0.99
+      }
+    ],
+    { key1: BASE_MEDIA_ITEMS.key1, key2: BASE_MEDIA_ITEMS.key2 },
+    2
+  )
+
+  const page = await openAppTab(context, extensionId)
+  await expect(page.getByText("1 Duplicate Set Ready")).toBeVisible({
+    timeout: 5000
+  })
+
+  await page.getByRole("button", { name: /Trash all copies/i }).click()
+  await expect(
+    page.getByRole("button", { name: /Move 2 Duplicates to Trash/i })
+  ).toBeVisible()
+  await expect(page.locator(".MuiCard-root").nth(0)).toContainText("Will trash")
+  await expect(page.locator(".MuiCard-root").nth(1)).toContainText("Will trash")
+
+  const sw = context.serviceWorkers()[0]
+  await expect
+    .poll(async () => {
+      const stored = await sw.evaluate(
+        () =>
+          new Promise<{
+            selections?: { keptOverrides?: Record<string, string[]> }
+          }>((resolve) => {
+            chrome.storage.local.get("selections", resolve)
+          })
+      )
+      return stored.selections?.keptOverrides?.g1
+    })
+    .toEqual([])
+
+  await page.reload()
+  await expect(page.getByText("1 Duplicate Set Ready")).toBeVisible({
+    timeout: 5000
+  })
+  await expect(
+    page.getByRole("button", { name: /Move 2 Duplicates to Trash/i })
+  ).toBeVisible()
+  await expect(page.locator(".MuiCard-root").nth(0)).toContainText("Will trash")
+  await expect(page.locator(".MuiCard-root").nth(1)).toContainText("Will trash")
 
   await page.close()
   await clearStorage(context)
@@ -801,7 +863,7 @@ test("ignores stale kept override keys from saved selections", async () => {
   await injectSelections(context, ["g1"], { g1: ["missing-key"] })
 
   const page = await openAppTab(context, extensionId)
-  await expect(page.getByText("1 Duplicate Group Found")).toBeVisible({
+  await expect(page.getByText("1 Duplicate Set Ready")).toBeVisible({
     timeout: 5000
   })
   await expect(
@@ -816,11 +878,11 @@ test("ignores stale kept override keys from saved selections", async () => {
     .poll(async () => {
       const stored = await sw.evaluate(
         () =>
-          new Promise<{ selections?: { keptOverrides?: Record<string, string[]> } }>(
-            (resolve) => {
-              chrome.storage.local.get("selections", resolve)
-            }
-          )
+          new Promise<{
+            selections?: { keptOverrides?: Record<string, string[]> }
+          }>((resolve) => {
+            chrome.storage.local.get("selections", resolve)
+          })
       )
       return stored.selections?.keptOverrides?.g1 ?? []
     })
@@ -866,7 +928,7 @@ test("ignores malformed saved selections without crashing on load", async () => 
   )
 
   const page = await openAppTab(context, extensionId)
-  await expect(page.getByText("1 Duplicate Group Found")).toBeVisible({
+  await expect(page.getByText("1 Duplicate Set Ready")).toBeVisible({
     timeout: 5000
   })
   await expect(

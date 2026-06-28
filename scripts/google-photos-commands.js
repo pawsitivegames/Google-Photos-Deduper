@@ -45,14 +45,15 @@ function postError(command, requestId, error, data) {
 }
 
 // command is optional; when provided, the app can route progress to the right handler.
-function postProgress(requestId, itemsProcessed, message, command) {
+function postProgress(requestId, itemsProcessed, message, command, data) {
   window.postMessage({
     app: GPD_APP_ID,
     action: "gptkProgress",
     requestId,
     itemsProcessed,
     message,
-    ...(command !== undefined ? { command } : {})
+    ...(command !== undefined ? { command } : {}),
+    ...(data !== undefined ? { data } : {})
   })
 }
 
@@ -586,7 +587,15 @@ async function trashItems(requestId, args) {
         requestId,
         movedDedupKeys.length,
         `Moved ${movedDedupKeys.length} of ${total} items to trash`,
-        "trashItems"
+        "trashItems",
+        {
+          trashedKeys: mediaKeysForDedupKeys(
+            movedDedupKeys,
+            dedupKeys,
+            mediaKeysToTrash
+          ),
+          trashedDedupKeys: movedDedupKeys.slice()
+        }
       )
       if (i < chunks.length - 1) await sleep(batchPauseMs)
     }

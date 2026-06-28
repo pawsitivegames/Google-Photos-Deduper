@@ -21,12 +21,14 @@ export interface LaunchAppMessage extends BaseMessage {
 
 export interface HealthCheckMessage extends BaseMessage {
   action: "healthCheck"
+  provider?: PhotoProvider
 }
 
 export interface HealthCheckResultMessage extends BaseMessage {
   action: "healthCheck.result"
   success: boolean
   hasGptk: boolean
+  provider?: PhotoProvider
   accountEmail?: string
 }
 
@@ -40,6 +42,7 @@ export interface ScanLibraryMessage extends BaseMessage {
 }
 
 export type ScanMode = "smart" | "full"
+export type PhotoProvider = "google" | "icloud"
 
 export interface ScanOptions {
   similarityThreshold: number // 0.90 - 1.00
@@ -103,6 +106,7 @@ export interface GptkCommandMessage extends BaseMessage {
   command: string
   args?: unknown
   requestId: string
+  provider?: PhotoProvider
 }
 
 export interface GptkResultMessage extends BaseMessage {
@@ -121,6 +125,7 @@ export interface GptkProgressMessage extends BaseMessage {
   message?: string
   /** Set by batch operations (e.g. "trashItems") so the app can route progress correctly. */
   command?: string
+  data?: unknown
 }
 
 export interface GptkLogMessage extends BaseMessage {
@@ -158,6 +163,7 @@ export interface GpdMediaItem {
   dedupKey: string
   thumb: string // thumbnail URL (append =w200-h200 for thumbnails; use bare for full-res)
   productUrl?: string // link to item in Google Photos web app
+  provider?: PhotoProvider
   timestamp: number // taken date
   creationTimestamp: number // upload date
   resWidth?: number
@@ -201,6 +207,7 @@ export interface StoredState {
     newestCreationTimestamp?: number // for incremental fetch on next scan
     mediaItemsAreComplete?: boolean
     accountEmail?: string
+    sourceProvider?: PhotoProvider
     dateRange?: ScanSettings["dateRange"]
     albumScope?: ScanSettings["albumScope"]
   }
@@ -213,6 +220,7 @@ export interface StoredState {
 }
 
 export interface ScanSettings {
+  sourceProvider?: PhotoProvider
   similarityThreshold: number
   scanMode: ScanMode
   /**
@@ -238,6 +246,7 @@ export interface ScanAlbumScope {
 }
 
 export const DEFAULT_SETTINGS: ScanSettings = {
+  sourceProvider: "google",
   similarityThreshold: 0.95,
   scanMode: "full",
   smartWindowSec: 1

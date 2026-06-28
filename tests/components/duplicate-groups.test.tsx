@@ -2,8 +2,9 @@
  * Component tests for DuplicateGroups.
  *
  * Covers:
- * - Multi-keep chip rendering (Keep / Trash / none)
+ * - Multi-keep chip rendering (Keep this / Will trash / none)
  * - Card click triggers onToggleKept
+ * - Trash all copies action
  * - Zoom button opens the photo viewer modal
  * - Zoom button does not trigger onToggleKept (stopPropagation)
  */
@@ -86,7 +87,8 @@ const defaultProps = {
   selectedGroupIds: new Set(["g1"]),
   onToggleGroup: vi.fn(),
   keptByGroupId: new Map([["g1", new Set(["img1"])]]),
-  onToggleKept: vi.fn()
+  onToggleKept: vi.fn(),
+  onTrashAll: vi.fn()
 }
 
 // ============================================================
@@ -96,14 +98,14 @@ const defaultProps = {
 describe("DuplicateGroups — chip rendering", () => {
   it("shows Keep chip only for kept item", () => {
     wrap(<DuplicateGroups {...defaultProps} />)
-    const keepChips = screen.getAllByText("Keep")
+    const keepChips = screen.getAllByText("Keep this")
     expect(keepChips).toHaveLength(1)
   })
 
   it("shows Trash chips for non-kept items when group is selected", () => {
     wrap(<DuplicateGroups {...defaultProps} />)
     // img2 and img3 are not kept and group is selected
-    const trashChips = screen.getAllByText("Trash")
+    const trashChips = screen.getAllByText("Will trash")
     expect(trashChips).toHaveLength(2)
   })
 
@@ -114,7 +116,7 @@ describe("DuplicateGroups — chip rendering", () => {
         selectedGroupIds={new Set()} // deselected
       />
     )
-    expect(screen.queryByText("Trash")).not.toBeInTheDocument()
+    expect(screen.queryByText("Will trash")).not.toBeInTheDocument()
   })
 
   it("shows multiple Keep chips when multiple items are kept", () => {
@@ -124,10 +126,21 @@ describe("DuplicateGroups — chip rendering", () => {
         keptByGroupId={new Map([["g1", new Set(["img1", "img2"])]])}
       />
     )
-    const keepChips = screen.getAllByText("Keep")
+    const keepChips = screen.getAllByText("Keep this")
     expect(keepChips).toHaveLength(2)
-    const trashChips = screen.getAllByText("Trash")
+    const trashChips = screen.getAllByText("Will trash")
     expect(trashChips).toHaveLength(1) // only img3
+  })
+
+  it("shows every item as trash when no copy is kept", () => {
+    wrap(
+      <DuplicateGroups
+        {...defaultProps}
+        keptByGroupId={new Map([["g1", new Set()]])}
+      />
+    )
+    expect(screen.queryByText("Keep this")).not.toBeInTheDocument()
+    expect(screen.getAllByText("Will trash")).toHaveLength(3)
   })
 
   it("shows exact duplicate classification when metadata matches", () => {
@@ -241,6 +254,30 @@ describe("DuplicateGroups — card click", () => {
 })
 
 // ============================================================
+// Trash all copies
+// ============================================================
+
+describe("DuplicateGroups — trash all copies", () => {
+  it("calls onTrashAll with the current group", () => {
+    const onTrashAll = vi.fn()
+    const onToggleGroup = vi.fn()
+    wrap(
+      <DuplicateGroups
+        {...defaultProps}
+        onTrashAll={onTrashAll}
+        onToggleGroup={onToggleGroup}
+      />
+    )
+
+    fireEvent.click(screen.getByRole("button", { name: /trash all copies/i }))
+
+    expect(onTrashAll).toHaveBeenCalledOnce()
+    expect(onTrashAll).toHaveBeenCalledWith(group)
+    expect(onToggleGroup).not.toHaveBeenCalled()
+  })
+})
+
+// ============================================================
 // Zoom overlay → opens viewer modal
 // ============================================================
 
@@ -334,7 +371,7 @@ describe("DuplicateGroups — virtualized rendering", () => {
     expect(
       screen.getByTestId("duplicate-groups-virtual-list")
     ).toBeInTheDocument()
-    expect(screen.getByText("80 Duplicate Groups Found")).toBeInTheDocument()
+    expect(screen.getByText("80 Duplicate Sets Ready")).toBeInTheDocument()
     expect(screen.getByTitle("item-0-a.jpg")).toBeInTheDocument()
     expect(screen.queryByTitle("item-79-a.jpg")).not.toBeInTheDocument()
   })

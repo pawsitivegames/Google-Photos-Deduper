@@ -142,7 +142,7 @@ describe("ScanConfig — taken date range", () => {
   it("labels the primary button as a date range scan when scoped", () => {
     renderConfig({ dateRange: { from: "2024-01-01", to: "2024-12-31" } })
     expect(
-      screen.getByRole("button", { name: /Scan Date Range/i })
+      screen.getByRole("button", { name: /Check this date range/i })
     ).toBeInTheDocument()
   })
 
@@ -151,7 +151,9 @@ describe("ScanConfig — taken date range", () => {
       dateRange: { from: "2025-01-01", to: "2024-01-01" }
     })
 
-    const button = screen.getByRole("button", { name: /Scan Date Range/i })
+    const button = screen.getByRole("button", {
+      name: /Check this date range/i
+    })
     expect(button).toBeDisabled()
     expect(screen.getByText(/start date must be before/i)).toBeInTheDocument()
 
@@ -218,7 +220,7 @@ describe("ScanConfig — album scope", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /More options/i }))
     expect(screen.getByText(/2 albums available/i)).toBeInTheDocument()
-    fireEvent.mouseDown(screen.getByRole("combobox", { name: /Album/i }))
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: /Library area/i }))
     fireEvent.click(screen.getByRole("option", { name: /Tiny test album/i }))
 
     expect(onSettingsChange).toHaveBeenCalledWith({
@@ -241,11 +243,41 @@ describe("ScanConfig — album scope", () => {
     })
 
     expect(
-      screen.getByRole("button", { name: /Scan Album/i })
+      screen.getByRole("button", { name: /Check this album/i })
     ).toBeInTheDocument()
     expect(
-      screen.getByText(/Scanning only Tiny test album/i)
+      screen.getByText(/Only checking Tiny test album/i)
     ).toBeInTheDocument()
+  })
+})
+
+describe("ScanConfig — photo source", () => {
+  it("switches to iCloud and explains scan-only support", () => {
+    const { onSettingsChange } = renderConfig()
+
+    fireEvent.click(screen.getByRole("button", { name: /More options/i }))
+    fireEvent.click(screen.getByRole("button", { name: /iCloud Photos/i }))
+
+    expect(onSettingsChange).toHaveBeenCalledWith({
+      sourceProvider: "icloud",
+      albumScope: undefined
+    })
+  })
+
+  it("labels iCloud scans and hides Google album controls", () => {
+    renderConfig({ sourceProvider: "icloud" })
+
+    expect(
+      screen.getByRole("button", { name: /Check loaded iCloud photos/i })
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText(/Trash and restore actions remain/i)
+    ).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole("button", { name: /More options/i }))
+    expect(
+      screen.queryByRole("combobox", { name: /Library area/i })
+    ).not.toBeInTheDocument()
   })
 })
 
@@ -332,7 +364,9 @@ describe("ScanConfig — interrupted scan resume", () => {
       screen.getByText(/completed work will be reused/i)
     ).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole("button", { name: /Resume Scan/i }))
+    fireEvent.click(
+      screen.getByRole("button", { name: /Continue previous scan/i })
+    )
     fireEvent.click(screen.getByRole("button", { name: /Dismiss/i }))
     expect(onResumeScan).toHaveBeenCalledOnce()
     expect(onDismissResume).toHaveBeenCalledOnce()

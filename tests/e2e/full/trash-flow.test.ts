@@ -6,7 +6,7 @@
  *   1. `npm run build`
  *   2. Chrome running with --remote-debugging-port=9222, extension loaded,
  *      and logged into Google Photos. (Same Chrome used for chrome-devtools MCP.)
- *   3. Google Photos account must have at least one duplicate group.
+ *   3. Google Photos account must have at least one duplicate set.
  *      (Run the scan test first, or have saved results from a prior scan.)
  *
  * Run: `npm run test:e2e`
@@ -65,10 +65,10 @@ test("trashes duplicates via API and undoes via undo snackbar", async () => {
 
     // Wait for the app to be ready — either fresh connected state or already showing results
     const scanButton = appPage.getByRole("button", {
-      name: /Scan (Library|Album|Date Range)/i
+      name: /Check (entire library|this album|this date range)/i
     })
-    const rescanButton = appPage.getByRole("button", { name: /re-scan/i })
-    const resultsHeading = appPage.getByText(/Duplicate Groups Found/)
+    const rescanButton = appPage.getByRole("button", { name: /Scan again/i })
+    const resultsHeading = appPage.getByText(/Duplicate Sets Ready/)
 
     await expect(
       scanButton.or(rescanButton).or(resultsHeading).first()
@@ -84,13 +84,13 @@ test("trashes duplicates via API and undoes via undo snackbar", async () => {
       }
       await applyConfiguredScope(appPage)
       await scanButton.click()
-      await expect(appPage.getByText(/items scanned/)).toBeVisible({
+      await expect(appPage.getByText(/photos and videos checked/)).toBeVisible({
         timeout: 300_000
       })
     }
 
-    // Keep the live test conservative: trash only the first visible duplicate group.
-    await appPage.getByRole("button", { name: /^Deselect All$/i }).click()
+    // Keep the live test conservative: trash only the first visible duplicate set.
+    await appPage.getByRole("button", { name: /^Skip all$/i }).click()
     await appPage.locator('input[type="checkbox"]').first().check()
 
     // Skip gracefully if no duplicates are selected in this account.
@@ -103,7 +103,7 @@ test("trashes duplicates via API and undoes via undo snackbar", async () => {
     }
 
     // Record group count before trash
-    const groupCountEl = appPage.getByText(/\d+ duplicate groups?$/)
+    const groupCountEl = appPage.getByText(/\d+ duplicate sets? to review$/)
     const groupCountBefore = await groupCountEl.textContent()
 
     const trashButtonText = (await trashButton.textContent()) || ""

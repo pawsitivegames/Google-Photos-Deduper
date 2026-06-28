@@ -467,8 +467,9 @@ describe("trashItems — chunking", () => {
   it("posts a progress message after each chunk", async () => {
     const { messages, restore } = collectMessages()
     const dedupKeys = Array.from({ length: 50 }, (_, i) => `dk-${i}`)
+    const mediaKeysToTrash = Array.from({ length: 50 }, (_, i) => `mk-${i}`)
 
-    sendCommand("trashItems", "req-3", { dedupKeys })
+    sendCommand("trashItems", "req-3", { dedupKeys, mediaKeysToTrash })
     await flush()
 
     const progressMsgs = messages.filter(
@@ -478,7 +479,15 @@ describe("trashItems — chunking", () => {
     // One progress message per chunk (2 chunks for 50 items)
     expect(progressMsgs).toHaveLength(2)
     expect(progressMsgs[0].itemsProcessed).toBe(25)
+    expect(progressMsgs[0].data).toMatchObject({
+      trashedKeys: mediaKeysToTrash.slice(0, 25),
+      trashedDedupKeys: dedupKeys.slice(0, 25)
+    })
     expect(progressMsgs[1].itemsProcessed).toBe(50)
+    expect(progressMsgs[1].data).toMatchObject({
+      trashedKeys: mediaKeysToTrash,
+      trashedDedupKeys: dedupKeys
+    })
     restore()
   })
 

@@ -5,7 +5,7 @@
  * stable blob URL, letting us test navigation and UI state synchronously.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { render, screen, fireEvent } from "@testing-library/react"
+import { render, screen, fireEvent, waitFor } from "@testing-library/react"
 import { ThemeProvider, createTheme } from "@mui/material/styles"
 import { PhotoViewerModal } from "../../components/PhotoViewerModal"
 import type { GpdMediaItem } from "../../lib/types"
@@ -23,12 +23,14 @@ vi.stubGlobal("URL", {
   revokeObjectURL: () => {},
 })
 
-vi.stubGlobal("fetch", (_url: string) =>
+const fetchMock = vi.fn((_url: string) =>
   Promise.resolve({
     ok: true,
     blob: () => Promise.resolve(new Blob(["img"], { type: "image/jpeg" })),
   } as Response)
 )
+
+vi.stubGlobal("fetch", fetchMock)
 
 // ============================================================
 // Helpers
@@ -74,6 +76,12 @@ const defaultProps = {
 describe("PhotoViewerModal", () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    fetchMock.mockImplementation((_url: string) =>
+      Promise.resolve({
+        ok: true,
+        blob: () => Promise.resolve(new Blob(["img"], { type: "image/jpeg" })),
+      } as Response)
+    )
   })
 
   it("renders the modal when open=true", () => {
@@ -100,6 +108,83 @@ describe("PhotoViewerModal", () => {
     wrap(<PhotoViewerModal {...defaultProps} />)
     expect(screen.getByText(/3024×4032/)).toBeInTheDocument()
     expect(screen.getByText(/Taken/)).toBeInTheDocument()
+  })
+})
+
+// ============================================================
+// Video playback
+// ============================================================
+
+describe("PhotoViewerModal — video playback", () => {
+  it("requests a playable video rendition for video items", async () => {
+    const video = makeItem("vid1", {
+      duration: 12_000,
+      fileName: "clip.mp4",
+    })
+
+    wrap(
+      <PhotoViewerModal
+        {...defaultProps}
+        items={[video]}
+        keptSet={new Set(["vid1"])}
+      />
+    )
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://example.com/vid1=dv",
+        expect.objectContaining({ credentials: "include" })
+      )
+    })
+  })
+
+  it("renders native video controls when the fetched blob is video", async () => {
+    fetchMock.mockImplementation((_url: string) =>
+      Promise.resolve({
+        ok: true,
+        blob: () => Promise.resolve(new Blob(["video"], { type: "video/mp4" })),
+      } as Response)
+    )
+
+    const video = makeItem("vid1", {
+      duration: 12_000,
+      fileName: "clip.mp4",
+    })
+
+    wrap(
+      <PhotoViewerModal
+        {...defaultProps}
+        items={[video]}
+        keptSet={new Set(["vid1"])}
+      />
+    )
+
+    const player = await screen.findByLabelText("Play clip.mp4")
+    expect(player.tagName.toLowerCase()).toBe("video")
+    expect(player).toHaveAttribute("controls")
+  })
+
+  it("shows a clear Google Photos play action when only a poster is available", async () => {
+    const video = makeItem("vid1", {
+      duration: 12_000,
+      fileName: "clip.mp4",
+    })
+
+    wrap(
+      <PhotoViewerModal
+        {...defaultProps}
+        items={[video]}
+        keptSet={new Set(["vid1"])}
+      />
+    )
+
+    const playLinks = await screen.findAllByRole("link", {
+      name: /play in google photos/i,
+    })
+    expect(playLinks[0]).toHaveAttribute(
+      "href",
+      "https://photos.google.com/photo/vid1"
+    )
   })
 })
 

@@ -1,4 +1,14 @@
+import "@fontsource/dm-sans/400.css"
+import "@fontsource/dm-sans/500.css"
+import "@fontsource/dm-sans/700.css"
+
 import CloseIcon from "@mui/icons-material/Close"
+import CollectionsRoundedIcon from "@mui/icons-material/CollectionsRounded"
+import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded"
+import DoneAllRoundedIcon from "@mui/icons-material/DoneAllRounded"
+import PhotoLibraryRoundedIcon from "@mui/icons-material/PhotoLibraryRounded"
+import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded"
+import RefreshRoundedIcon from "@mui/icons-material/RefreshRounded"
 import Alert from "@mui/material/Alert"
 import AppBar from "@mui/material/AppBar"
 import Box from "@mui/material/Box"
@@ -19,15 +29,15 @@ import Toolbar from "@mui/material/Toolbar"
 import Typography from "@mui/material/Typography"
 import confetti from "canvas-confetti"
 import {
-  type Dispatch,
-  type MutableRefObject,
-  type SetStateAction,
   useCallback,
   useEffect,
   useMemo,
   useReducer,
   useRef,
-  useState
+  useState,
+  type Dispatch,
+  type MutableRefObject,
+  type SetStateAction
 } from "react"
 
 import { ActionBar } from "../components/ActionBar"
@@ -39,8 +49,8 @@ import { appReducer } from "../lib/app-reducer"
 import type { AppAction, AppState } from "../lib/app-reducer"
 import { buildCacheDiagnosticsReport } from "../lib/cache-diagnostics"
 import { debug } from "../lib/debug"
-import { classifyDuplicateGroup } from "../lib/duplicate-classifier"
 import { buildDeleteReport, type DeleteReport } from "../lib/delete-report"
+import { classifyDuplicateGroup } from "../lib/duplicate-classifier"
 import {
   fullDetectDuplicates,
   selectDefaultKeep,
@@ -96,6 +106,201 @@ const TRASH_RETRY_BACKOFF_MS = 1000
 const DELETE_REPORTS_KEY = "deleteReports"
 const TRASH_RESULT_REPORTS_KEY = "trashResultReports"
 
+function WorkflowRail({
+  stage,
+  totalItems,
+  totalGroupCount,
+  exactGroupCount,
+  similarGroupCount,
+  duplicateCount,
+  scanDetail,
+  onRescan
+}: {
+  stage: "setup" | "scan" | "review" | "trash" | "done"
+  totalItems: number
+  totalGroupCount: number
+  exactGroupCount: number
+  similarGroupCount: number
+  duplicateCount: number
+  scanDetail?: string
+  onRescan: () => void
+}) {
+  const stageIndex = {
+    setup: 0,
+    scan: 1,
+    review: 2,
+    trash: 3,
+    done: 3
+  }[stage]
+  const headline =
+    stage === "setup"
+      ? "Choose what to check"
+      : stage === "scan"
+        ? "Finding duplicates"
+        : stage === "trash"
+          ? "Moving to trash"
+          : stage === "done"
+            ? "Nothing to clean up"
+            : "Choose what stays"
+  const helper =
+    stage === "setup"
+      ? "Pick the library area and match sensitivity, then start the scan."
+      : stage === "scan"
+        ? "The extension is checking photos and videos and building review sets."
+        : stage === "trash"
+          ? "Included duplicates are moved in batches. Undo remains available after completion."
+          : stage === "done"
+            ? "No duplicate sets are waiting. Try different settings if needed."
+            : "Pick the copy to keep in each set, then trash the rest safely."
+  const steps = [
+    {
+      icon: <PhotoLibraryRoundedIcon fontSize="small" />,
+      label: "Choose",
+      value: stageIndex === 0 ? "Current" : "Done"
+    },
+    {
+      icon: <RefreshRoundedIcon fontSize="small" />,
+      label: "Find",
+      value:
+        stage === "scan"
+          ? scanDetail || "Working"
+          : stageIndex > 1
+            ? "Done"
+            : "Next"
+    },
+    {
+      icon: <CollectionsRoundedIcon fontSize="small" />,
+      label: "Review",
+      value:
+        stage === "review"
+          ? `${totalGroupCount.toLocaleString()} sets`
+          : stageIndex > 2
+            ? "Done"
+            : "Next"
+    },
+    {
+      icon: <DeleteOutlineRoundedIcon fontSize="small" />,
+      label: "Trash safely",
+      value:
+        stage === "trash"
+          ? `${duplicateCount.toLocaleString()} moving`
+          : stage === "review"
+            ? `${duplicateCount.toLocaleString()} selected`
+            : stage === "done"
+              ? "Done"
+              : "Final"
+    }
+  ]
+
+  return (
+    <Box
+      component="aside"
+      sx={{
+        position: { md: "sticky" },
+        top: { md: 88 },
+        alignSelf: "flex-start",
+        width: { xs: "100%", md: 272 },
+        flexShrink: 0,
+        border: "1px solid",
+        borderColor: "divider",
+        borderRadius: 3,
+        bgcolor: "rgba(255,255,255,0.72)",
+        backdropFilter: "saturate(180%) blur(22px)",
+        overflow: "hidden",
+        boxShadow: "0 20px 56px rgba(0, 0, 0, 0.08)"
+      }}>
+      <Box sx={{ p: 2.25, borderBottom: "1px solid", borderColor: "divider" }}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 2 }}>
+          {stage === "scan" ? (
+            <CircularProgress size={16} thickness={5} />
+          ) : (
+            <DoneAllRoundedIcon color="success" fontSize="small" />
+          )}
+          <Typography variant="subtitle2" fontWeight={700}>
+            {headline}
+          </Typography>
+        </Box>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ display: "block", mb: 2 }}>
+          {helper}
+        </Typography>
+        <Box
+          sx={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            gap: 1.5
+          }}>
+          <Box>
+            <Typography variant="h6">
+              {totalGroupCount.toLocaleString()}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              sets
+            </Typography>
+          </Box>
+          <Box>
+            <Typography variant="h6">{totalItems.toLocaleString()}</Typography>
+            <Typography variant="caption" color="text.secondary">
+              checked
+            </Typography>
+          </Box>
+          <Box>
+            <Typography variant="h6">
+              {exactGroupCount.toLocaleString()}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              identical
+            </Typography>
+          </Box>
+          <Box>
+            <Typography variant="h6">
+              {similarGroupCount.toLocaleString()}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              similar
+            </Typography>
+          </Box>
+        </Box>
+        <Button
+          fullWidth
+          variant="contained"
+          startIcon={<PlayArrowRoundedIcon />}
+          onClick={onRescan}
+          sx={{ mt: 2, borderRadius: 999 }}>
+          Start over
+        </Button>
+      </Box>
+
+      <Box sx={{ p: 1 }}>
+        {steps.map((item, index) => (
+          <Box
+            key={item.label}
+            sx={{
+              display: "flex",
+              alignItems: "center",
+              gap: 1.25,
+              px: 1.25,
+              py: 1.1,
+              borderRadius: 2,
+              color: index === stageIndex ? "primary.main" : "text.secondary",
+              bgcolor: index === stageIndex ? "primary.light" : "transparent"
+            }}>
+            {item.icon}
+            <Typography variant="body2" fontWeight={700} sx={{ flex: 1 }}>
+              {item.label}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              {item.value}
+            </Typography>
+          </Box>
+        ))}
+      </Box>
+    </Box>
+  )
+}
+
 function generateRequestId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
@@ -121,12 +326,23 @@ function fullScanSettingsPatch(
   scanSettings: ScanSettings
 ): Partial<ScanSettings> {
   return {
+    sourceProvider: scanSettings.sourceProvider ?? "google",
     similarityThreshold: scanSettings.similarityThreshold,
     scanMode: scanSettings.scanMode,
     smartWindowSec: scanSettings.smartWindowSec,
     dateRange: scanSettings.dateRange,
     albumScope: scanSettings.albumScope
   }
+}
+
+function providerLabel(provider: ScanSettings["sourceProvider"]): string {
+  return provider === "icloud" ? "iCloud Photos" : "Google Photos"
+}
+
+function providerUrl(provider: ScanSettings["sourceProvider"]): string {
+  return provider === "icloud"
+    ? "https://www.icloud.com/photos"
+    : "https://photos.google.com/login"
 }
 
 function dateToUtcMs(value: string, endOfDay = false): number {
@@ -222,7 +438,10 @@ function normalizeStoredSettings(settings: ScanSettings): ScanSettings {
     return DEFAULT_SETTINGS
   }
 
-  return settings
+  return {
+    ...settings,
+    sourceProvider: settings.sourceProvider ?? "google"
+  }
 }
 
 async function persistScanCheckpoint(
@@ -269,9 +488,7 @@ function deserializeStoredSelections(value: unknown): PendingSelections | null {
       const validMediaKeys = mediaKeys.filter(
         (key): key is string => typeof key === "string"
       )
-      if (validMediaKeys.length > 0) {
-        keptOverrides[groupId] = new Set(validMediaKeys)
-      }
+      keptOverrides[groupId] = new Set(validMediaKeys)
     }
   }
   return {
@@ -329,6 +546,8 @@ export default function App() {
   const [albums, setAlbums] = useState<GpdAlbum[]>([])
   const [albumsLoading, setAlbumsLoading] = useState(false)
   const [albumsError, setAlbumsError] = useState<string | null>(null)
+  const [accountValidationComplete, setAccountValidationComplete] =
+    useState(false)
 
   // Undo trash state: stored after a successful trash operation
   const [undoData, setUndoData] = useState<UndoData | null>(null)
@@ -362,6 +581,8 @@ export default function App() {
   // silently before showing a disconnected error.
   const healthCheckAttemptsRef = useRef(0)
   const albumsRequestedForAccountRef = useRef<string | null>(null)
+  const currentAccountEmailRef = useRef<string | undefined>(undefined)
+  const currentHasGptkRef = useRef(false)
 
   // Holds selections loaded from storage; applied once when groups first load
   const pendingSelectionsRef = useRef<PendingSelections | null>(null)
@@ -379,6 +600,13 @@ export default function App() {
   }, [])
 
   const requestAlbums = useCallback((accountEmail?: string) => {
+    if ((settingsRef.current.sourceProvider ?? "google") !== "google") {
+      setAlbums([])
+      setAlbumsLoading(false)
+      setAlbumsError(null)
+      albumsRequestedForAccountRef.current = null
+      return
+    }
     const key = accountEmail || "__unknown__"
     albumsRequestedForAccountRef.current = key
     setAlbumsLoading(true)
@@ -387,7 +615,8 @@ export default function App() {
       app: APP_ID,
       action: "gptkCommand",
       command: "listAlbums",
-      requestId: generateRequestId()
+      requestId: generateRequestId(),
+      provider: "google"
     })
   }, [])
 
@@ -420,14 +649,14 @@ export default function App() {
     state.status === "results" || state.status === "trashing"
       ? state.groups
       : state.status === "scanning"
-        ? (state.partialGroups ?? null)
-      : null
+        ? state.partialGroups ?? null
+        : null
   const groups = useMemo(() => stateGroups ?? [], [stateGroups])
   const displayMediaItems =
     state.status === "results" || state.status === "trashing"
       ? state.mediaItems
       : state.status === "scanning"
-        ? (state.partialMediaItems ?? {})
+        ? state.partialMediaItems ?? {}
         : {}
   useEffect(() => {
     if (pendingSelectionsRef.current) {
@@ -447,14 +676,62 @@ export default function App() {
         if (!group) continue
         const validKeys = new Set(group.mediaKeys)
         const filteredKeys = [...keys].filter((key) => validKeys.has(key))
-        if (filteredKeys.length > 0) filteredKept[id] = new Set(filteredKeys)
+        if (keys.size === 0 || filteredKeys.length > 0) {
+          filteredKept[id] = new Set(filteredKeys)
+        }
       }
       setKeptOverrides(filteredKept)
+      const canWriteSanitizedSelections =
+        state.status === "results" && !state.accountEmail
+      if (canWriteSanitizedSelections) {
+        chrome.storage.local.set({
+          selections: {
+            selectedGroupIds: [...next],
+            keptOverrides: Object.fromEntries(
+              Object.entries(filteredKept).map(([id, keys]) => [id, [...keys]])
+            )
+          }
+        })
+      }
     } else {
       setSelectedGroupIds(new Set(groups.map((g) => g.id)))
       setKeptOverrides({})
     }
   }, [groups])
+
+  useEffect(() => {
+    if (!accountValidationComplete || state.status !== "results") return
+    const currentAccountEmail = currentAccountEmailRef.current
+    if (
+      !currentAccountEmail ||
+      areScanResultsValid(
+        {
+          accountEmail: state.accountEmail,
+          sourceProvider: settingsRef.current.sourceProvider
+        },
+        {
+          accountEmail: currentAccountEmail,
+          sourceProvider: settingsRef.current.sourceProvider
+        }
+      )
+    ) {
+      return
+    }
+    pendingSelectionsRef.current = null
+    setSelectedGroupIds(new Set())
+    setKeptOverrides({})
+    chrome.storage.local.remove(["scanResults", "selections"])
+    dispatch({
+      type: "HEALTH_CHECK_RESULT",
+      payload: {
+        app: APP_ID,
+        action: "healthCheck.result",
+        success: true,
+        hasGptk: currentHasGptkRef.current,
+        accountEmail: currentAccountEmail
+      }
+    })
+  }, [accountValidationComplete, state])
 
   const handleToggleGroup = useCallback((groupId: string) => {
     setSelectedGroupIds((prev) => {
@@ -496,19 +773,33 @@ export default function App() {
             healthCheckAttemptsRef.current++
             const delay = 400 * Math.pow(2, healthCheckAttemptsRef.current - 1)
             window.setTimeout(() => {
-              sendToServiceWorker({ app: APP_ID, action: "healthCheck" })
+              sendToServiceWorker({
+                app: APP_ID,
+                action: "healthCheck",
+                provider: settingsRef.current.sourceProvider ?? "google"
+              })
             }, delay)
             return
           }
-          if (msg.success) healthCheckAttemptsRef.current = 0
+          if (msg.success) {
+            healthCheckAttemptsRef.current = 0
+            currentAccountEmailRef.current = msg.accountEmail
+            currentHasGptkRef.current = msg.hasGptk
+          }
           const currentState = stateRef.current
           const checkpoint = scanCheckpointRef.current
           if (
             msg.success &&
             checkpoint &&
             !areScanResultsValid(
-              { accountEmail: checkpoint.accountEmail },
-              { accountEmail: msg.accountEmail }
+              {
+                accountEmail: checkpoint.accountEmail,
+                sourceProvider: settingsRef.current.sourceProvider
+              },
+              {
+                accountEmail: msg.accountEmail,
+                sourceProvider: settingsRef.current.sourceProvider
+              }
             )
           ) {
             clearResumeCheckpointState({
@@ -520,8 +811,14 @@ export default function App() {
             msg.success &&
             currentState.status === "results" &&
             !areScanResultsValid(
-              { accountEmail: currentState.accountEmail },
-              { accountEmail: msg.accountEmail }
+              {
+                accountEmail: currentState.accountEmail,
+                sourceProvider: settingsRef.current.sourceProvider
+              },
+              {
+                accountEmail: msg.accountEmail,
+                sourceProvider: settingsRef.current.sourceProvider
+              }
             )
           ) {
             pendingSelectionsRef.current = null
@@ -529,11 +826,16 @@ export default function App() {
             setKeptOverrides({})
             chrome.storage.local.remove(["scanResults", "selections"])
           }
+          setAccountValidationComplete(true)
           dispatch({
             type: "HEALTH_CHECK_RESULT",
             payload: msg
           })
-          if (msg.success && msg.hasGptk) {
+          if (
+            msg.success &&
+            msg.hasGptk &&
+            (settingsRef.current.sourceProvider ?? "google") === "google"
+          ) {
             const key = msg.accountEmail || "__unknown__"
             if (albumsRequestedForAccountRef.current !== key) {
               requestAlbums(msg.accountEmail)
@@ -569,7 +871,7 @@ export default function App() {
             // Drop stale results from scans that were killed/cancelled — their
             // GPTK request may have still been in-flight and arrives late
             if (result.requestId !== currentScanRequestIdRef.current) {
-              console.warn(
+              console.debug(
                 `[GPD] Dropping stale getAllMediaItems result for requestId ${result.requestId} (active: ${currentScanRequestIdRef.current})`
               )
               break
@@ -593,6 +895,24 @@ export default function App() {
                 items,
                 settingsRef.current.dateRange
               )
+              if (
+                items.length === 0 &&
+                (settingsRef.current.sourceProvider ?? "google") === "icloud"
+              ) {
+                const error =
+                  "No loaded iCloud photos were found. Open iCloud Photos, wait for thumbnails to appear, scroll the library to load photos, then scan again."
+                patchScanCheckpoint({
+                  status: "error",
+                  error,
+                  message: error
+                })
+                setResumeCheckpoint(scanCheckpointRef.current)
+                dispatch({
+                  type: "SCAN_ERROR",
+                  error
+                })
+                break
+              }
               dispatch({
                 type: "SCAN_MEDIA_FETCHED",
                 mediaItems: items
@@ -601,7 +921,7 @@ export default function App() {
                 phase: "downloading_thumbnails",
                 itemsProcessed: 0,
                 totalEstimate: items.length,
-                message: `Fetched ${items.length} items. Downloading thumbnails...`,
+                message: `Found ${items.length} photos and videos. Loading previews...`,
                 mediaItems:
                   items.length <= MAX_CHECKPOINT_MEDIA_ITEMS ? items : undefined
               })
@@ -733,10 +1053,17 @@ export default function App() {
         case "gptkProgress": {
           const progress = message as GptkProgressMessage
           if (progress.command === "trashItems") {
+            const data = progress.data as
+              | {
+                  trashedKeys?: string[]
+                  trashedDedupKeys?: string[]
+                }
+              | undefined
             console.log(`[GPD] trash progress: ${progress.itemsProcessed}`)
             dispatch({
               type: "TRASH_PROGRESS",
-              trashedSoFar: progress.itemsProcessed
+              trashedSoFar: progress.itemsProcessed,
+              trashedKeys: data?.trashedKeys
             })
           } else if (progress.command === "restoreItems") {
             console.log(`[GPD] restore progress: ${progress.itemsProcessed}`)
@@ -744,7 +1071,7 @@ export default function App() {
             patchScanCheckpoint({
               phase: "fetching",
               itemsProcessed: progress.itemsProcessed,
-              message: progress.message ?? "Fetching media items..."
+              message: progress.message ?? "Reading your library..."
             })
             dispatch({ type: "SCAN_PROGRESS", payload: progress })
           }
@@ -862,7 +1189,11 @@ export default function App() {
         refreshEmbeddingCacheCount()
         // Refresh account email after scan — the email in state may be stale
         // if the user switched accounts since the last health check.
-        sendToServiceWorker({ app: APP_ID, action: "healthCheck" })
+        sendToServiceWorker({
+          app: APP_ID,
+          action: "healthCheck",
+          provider: settingsRef.current.sourceProvider ?? "google"
+        })
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") {
           await logger.finalize("paused")
@@ -903,7 +1234,11 @@ export default function App() {
 
   // Health check on mount + recover any scan log entry orphaned by a page reload
   useEffect(() => {
-    sendToServiceWorker({ app: APP_ID, action: "healthCheck" })
+    sendToServiceWorker({
+      app: APP_ID,
+      action: "healthCheck",
+      provider: settingsRef.current.sourceProvider ?? "google"
+    })
     scanLoggerRef.current.recoverStale()
     refreshEmbeddingCacheCount()
   }, [refreshEmbeddingCacheCount])
@@ -927,15 +1262,66 @@ export default function App() {
           scanCheckpointRef.current = checkpoint
           setResumeCheckpoint(checkpoint)
         }
+        const storedSettings = result.settings
+          ? normalizeStoredSettings(result.settings)
+          : settingsRef.current
         if (result.settings) {
-          setSettings(normalizeStoredSettings(result.settings))
+          settingsRef.current = storedSettings
+          setSettings(storedSettings)
+        }
+        const currentAccountEmail = currentAccountEmailRef.current
+        const savedResultsAreForCurrentAccount =
+          !result.scanResults ||
+          currentAccountEmail === undefined ||
+          areScanResultsValid(result.scanResults, {
+            accountEmail: currentAccountEmail,
+            sourceProvider: storedSettings.sourceProvider ?? "google"
+          })
+        if (!savedResultsAreForCurrentAccount) {
+          pendingSelectionsRef.current = null
+          chrome.storage.local.remove(["scanResults", "selections"])
+          setStorageChecked(true)
+          return
         }
         if (result.selections) {
           // Store deserialized selections before dispatching LOAD_SAVED_RESULTS so
-          // the groups-change effect can apply them when groups first appear
-          pendingSelectionsRef.current = deserializeStoredSelections(
-            result.selections
-          )
+          // the groups-change effect can apply them when groups first appear.
+          const saved = deserializeStoredSelections(result.selections)
+          if (result.scanResults?.groups) {
+            const validGroups = new Map(
+              result.scanResults.groups.map((group) => [group.id, group])
+            )
+            const selectedGroupIds = new Set(
+              [...saved.selectedGroupIds].filter((id) => validGroups.has(id))
+            )
+            const keptOverrides: Record<string, Set<string>> = {}
+            for (const [id, keys] of Object.entries(saved.keptOverrides)) {
+              const group = validGroups.get(id)
+              if (!group) continue
+              const validKeys = new Set(group.mediaKeys)
+              const filteredKeys = [...keys].filter((key) => validKeys.has(key))
+              if (keys.size === 0 || filteredKeys.length > 0) {
+                keptOverrides[id] = new Set(filteredKeys)
+              }
+            }
+            pendingSelectionsRef.current = {
+              selectedGroupIds,
+              keptOverrides
+            }
+            chrome.storage.local.set({
+              selections: {
+                selectedGroupIds: [...selectedGroupIds],
+                keptOverrides: Object.fromEntries(
+                  Object.entries(keptOverrides).map(([id, keys]) => [
+                    id,
+                    [...keys]
+                  ])
+                )
+              }
+            })
+          } else {
+            pendingSelectionsRef.current = saved
+          }
         }
         if (
           result.scanResults?.totalItems &&
@@ -955,7 +1341,10 @@ export default function App() {
   }, [])
 
   // Persist scan results when they change (after scan or trash)
-  const mediaItems = state.status === "results" ? state.mediaItems : null
+  const mediaItems =
+    state.status === "results" || state.status === "trashing"
+      ? state.mediaItems
+      : null
 
   const groupClassificationById = useMemo(() => {
     const m = new Map<string, "exact" | "similar">()
@@ -986,8 +1375,7 @@ export default function App() {
       (group) => groupClassificationById.get(group.id) === reviewFilter
     )
   }, [groups, groupClassificationById, reviewFilter])
-  const provisionalGroups =
-    state.status === "scanning" ? groups : visibleGroups
+  const provisionalGroups = state.status === "scanning" ? groups : visibleGroups
 
   const handleSelectAll = useCallback(() => {
     setSelectedGroupIds((prev) => {
@@ -1093,6 +1481,16 @@ export default function App() {
     [defaultKeptSets]
   )
 
+  const handleTrashAllCopies = useCallback((group: DuplicateGroup) => {
+    setSelectedGroupIds((prev) => {
+      if (prev.has(group.id)) return prev
+      const next = new Set(prev)
+      next.add(group.id)
+      return next
+    })
+    setKeptOverrides((prev) => ({ ...prev, [group.id]: new Set() }))
+  }, [])
+
   const handleApplyKeepStrategy = useCallback(
     (strategy: KeepStrategy) => {
       if (!mediaItems) return
@@ -1107,10 +1505,16 @@ export default function App() {
     },
     [mediaItems, visibleGroups]
   )
-  const totalItems = state.status === "results" ? state.totalItems : 0
+  const totalItems =
+    state.status === "results" || state.status === "trashing"
+      ? state.totalItems
+      : 0
   const accountEmailForStorage =
-    state.status === "results" ? state.accountEmail : undefined
+    state.status === "results" || state.status === "trashing"
+      ? state.accountEmail
+      : undefined
   useEffect(() => {
+    if (!accountValidationComplete) return
     if (!mediaItems) return
     if (groups.length > 0) {
       const storedMediaItemCount = Object.keys(mediaItems).length
@@ -1130,8 +1534,12 @@ export default function App() {
           newestCreationTimestamp,
           mediaItemsAreComplete,
           accountEmail: accountEmailForStorage,
+          sourceProvider: settings.sourceProvider ?? "google",
           dateRange: activeDateRange(settings.dateRange),
-          albumScope: activeAlbumScope(settings.albumScope)
+          albumScope:
+            (settings.sourceProvider ?? "google") === "google"
+              ? activeAlbumScope(settings.albumScope)
+              : undefined
         }
       })
     } else {
@@ -1143,12 +1551,17 @@ export default function App() {
     mediaItems,
     totalItems,
     accountEmailForStorage,
+    accountValidationComplete,
     settings.dateRange,
     settings.albumScope
   ])
 
   // Persist selections when they change (only while results are showing)
   useEffect(() => {
+    const canPersistSelections =
+      accountValidationComplete ||
+      (!accountEmailForStorage && currentAccountEmailRef.current === undefined)
+    if (!canPersistSelections) return
     if (state.status !== "results") return
     if (groups.length === 0) {
       chrome.storage.local.remove("selections")
@@ -1164,7 +1577,9 @@ export default function App() {
       if (!group) continue
       const validKeys = new Set(group.mediaKeys)
       const filteredKeys = [...keys].filter((key) => validKeys.has(key))
-      if (filteredKeys.length > 0) validKeptOverrides[id] = filteredKeys
+      if (keys.size === 0 || filteredKeys.length > 0) {
+        validKeptOverrides[id] = filteredKeys
+      }
     }
     chrome.storage.local.set({
       selections: {
@@ -1172,12 +1587,32 @@ export default function App() {
         keptOverrides: validKeptOverrides
       }
     })
-  }, [selectedGroupIds, keptOverrides, state.status, groups])
+  }, [
+    selectedGroupIds,
+    keptOverrides,
+    state.status,
+    groups,
+    accountEmailForStorage,
+    accountValidationComplete
+  ])
 
   // Save settings on change
   useEffect(() => {
     chrome.storage.local.set({ settings })
   }, [settings])
+
+  useEffect(() => {
+    setAlbums([])
+    setAlbumsError(null)
+    setAlbumsLoading(false)
+    albumsRequestedForAccountRef.current = null
+    healthCheckAttemptsRef.current = 0
+    sendToServiceWorker({
+      app: APP_ID,
+      action: "healthCheck",
+      provider: settings.sourceProvider ?? "google"
+    })
+  }, [settings.sourceProvider])
 
   const handleStartScan = useCallback(
     async (settingsOverride?: ScanSettings) => {
@@ -1221,7 +1656,11 @@ export default function App() {
       cachedMediaItemsRef.current = null
       let sinceTimestamp: number | undefined
       const dateRange = activeDateRange(scanSettings.dateRange)
-      const albumScope = activeAlbumScope(scanSettings.albumScope)
+      const sourceProvider = scanSettings.sourceProvider ?? "google"
+      const albumScope =
+        sourceProvider === "google"
+          ? activeAlbumScope(scanSettings.albumScope)
+          : undefined
       try {
         const stored = (await chrome.storage.local.get(
           "scanResults"
@@ -1230,13 +1669,14 @@ export default function App() {
         if (
           !dateRange &&
           !albumScope &&
+          (prev?.sourceProvider ?? "google") === sourceProvider &&
           !prev?.dateRange &&
           !prev?.albumScope &&
           prev?.mediaItems &&
           Object.keys(prev.mediaItems).length > 0 &&
           prev.mediaItemsAreComplete !== false &&
           Object.keys(prev.mediaItems).length === prev.totalItems &&
-          areScanResultsValid(prev, { accountEmail })
+          areScanResultsValid(prev, { accountEmail, sourceProvider })
         ) {
           cachedMediaItemsRef.current = prev.mediaItems
           // Compute watermark if not stored (migration: first run after this deploy)
@@ -1259,6 +1699,7 @@ export default function App() {
         action: "gptkCommand",
         command: "getAllMediaItems",
         requestId,
+        provider: sourceProvider,
         args: {
           dateRange,
           albumScope,
@@ -1420,6 +1861,15 @@ export default function App() {
 
   const handleTrash = useCallback(() => {
     if (state.status !== "results") return
+    const hasIcloudItems = Object.values(state.mediaItems).some(
+      (item) => item.provider === "icloud"
+    )
+    if (hasIcloudItems) {
+      setTrashWarning(
+        "Trash is not available for iCloud Photos yet. Review and export the duplicate report instead."
+      )
+      return
+    }
 
     const dedupKeys: string[] = []
     const mediaKeysToTrash: string[] = []
@@ -1556,7 +2006,11 @@ export default function App() {
     ])
     dispatch({ type: "RESET" })
     healthCheckAttemptsRef.current = 0
-    sendToServiceWorker({ app: APP_ID, action: "healthCheck" })
+    sendToServiceWorker({
+      app: APP_ID,
+      action: "healthCheck",
+      provider: settingsRef.current.sourceProvider ?? "google"
+    })
   }, [])
 
   const handleUndo = useCallback(() => {
@@ -1606,19 +2060,66 @@ export default function App() {
           return sum + group.mediaKeys.filter((k) => !keptSet.has(k)).length
         }, 0)
       : 0
+  const workflowStage =
+    state.status === "scanning"
+      ? "scan"
+      : state.status === "results"
+        ? groups.length > 0
+          ? "review"
+          : "done"
+        : state.status === "trashing"
+          ? "trash"
+          : "setup"
+  const workflowTotalItems =
+    state.status === "results" || state.status === "trashing"
+      ? state.totalItems
+      : state.status === "scanning"
+        ? state.partialTotalItems ?? state.totalEstimate
+        : 0
+  const workflowGroups =
+    state.status === "results" || state.status === "trashing"
+      ? groups
+      : state.status === "scanning"
+        ? state.partialGroups ?? []
+        : []
+  const workflowExactGroupCount = workflowGroups.filter((group) => {
+    if (group.duplicateKind === "exact" || group.duplicateKind === "similar") {
+      return group.duplicateKind === "exact"
+    }
+    return (
+      Object.keys(displayMediaItems).length > 0 &&
+      classifyDuplicateGroup(group, displayMediaItems).duplicateKind === "exact"
+    )
+  }).length
+  const workflowSimilarGroupCount =
+    workflowGroups.length - workflowExactGroupCount
+  const workflowDuplicateCount =
+    state.status === "trashing"
+      ? Math.max(0, state.totalToTrash - state.trashedSoFar)
+      : duplicateCount
+  const workflowScanDetail =
+    state.status === "scanning"
+      ? state.totalEstimate > 0
+        ? `${state.itemsProcessed.toLocaleString()} of ${state.totalEstimate.toLocaleString()}`
+        : `${state.itemsProcessed.toLocaleString()} checked`
+      : undefined
 
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
 
-      {/* Sticky header */}
-      <AppBar position="sticky">
-        <Toolbar>
-          <Typography variant="h6" fontWeight={600} sx={{ flexGrow: 1 }}>
+      <AppBar position="sticky" elevation={0}>
+        <Toolbar sx={{ minHeight: 56, gap: 1.25 }}>
+          <PhotoLibraryRoundedIcon color="primary" />
+          <Typography variant="h6" fontWeight={700} sx={{ flexGrow: 1 }}>
             Google Photos Deduper
           </Typography>
           {"accountEmail" in state && state.accountEmail && (
-            <Typography variant="body2" sx={{ opacity: 0.8 }}>
+            <Typography
+              variant="body2"
+              color="text.secondary"
+              noWrap
+              sx={{ maxWidth: { xs: 150, sm: "none" } }}>
               Signed in as {state.accountEmail}
             </Typography>
           )}
@@ -1628,170 +2129,227 @@ export default function App() {
       {/* Main content */}
       <Box
         component="main"
-        sx={{ maxWidth: 1200, mx: "auto", px: 3, minHeight: "60vh" }}>
-        {state.status === "connecting" && (
-          <Box sx={{ display: "flex", justifyContent: "center", pt: 10 }}>
-            <CircularProgress disableShrink />
-          </Box>
-        )}
-
-        {state.status === "disconnected" && (
-          <Box
-            sx={{
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              pt: 8,
-              gap: 2
-            }}>
-            <Alert severity="error" sx={{ maxWidth: 480, width: "100%" }}>
-              {state.error}
-            </Alert>
-            <Box sx={{ display: "flex", gap: 1 }}>
-              <Button
-                variant="contained"
-                href="https://photos.google.com/login"
-                target="_blank"
-                rel="noopener noreferrer">
-                Open Google Photos
-              </Button>
-              <Button variant="outlined" onClick={handleReset}>
-                Retry Connection
-              </Button>
-            </Box>
-            <Typography variant="caption" color="text.secondary">
-              Return here once Google Photos is open and you're signed in.
-            </Typography>
-          </Box>
-        )}
-
-        {state.status === "connected" && (
-          <ScanConfig
-            settings={settings}
-            onSettingsChange={setSettings}
-            onStartScan={handleStartScan}
-            onResumeScan={handleResumeScan}
-            onDismissResume={handleDismissResume}
-            onClearCache={handleClearCache}
-            onRebuildCache={handleRebuildCache}
-            onExportCacheDiagnostics={handleExportCacheDiagnostics}
-            hasGptk={state.hasGptk}
-            cacheEntryCount={cacheEntryCount}
-            cacheStatus={cacheStatus}
-            cacheBusy={cacheBusy}
-            resumeCheckpoint={resumeCheckpoint}
-            albums={albums}
-            albumsLoading={albumsLoading}
-            albumsError={albumsError}
-            onRefreshAlbums={() => requestAlbums(state.accountEmail)}
+        sx={{
+          maxWidth:
+            state.status === "results" && groups.length > 0 ? 1500 : 1200,
+          mx: "auto",
+          px: { xs: 2, md: 3 },
+          py: { xs: 2, md: 3 },
+          minHeight: "calc(100vh - 64px)"
+        }}>
+        <Box
+          sx={{
+            display: "flex",
+            flexDirection: { xs: "column", md: "row" },
+            gap: 2.5,
+            alignItems: "flex-start"
+          }}>
+          <WorkflowRail
+            stage={workflowStage}
+            totalItems={workflowTotalItems}
+            totalGroupCount={workflowGroups.length}
+            exactGroupCount={workflowExactGroupCount}
+            similarGroupCount={workflowSimilarGroupCount}
+            duplicateCount={workflowDuplicateCount}
+            scanDetail={workflowScanDetail}
+            onRescan={handleReset}
           />
-        )}
 
-        {state.status === "scanning" && (
-          <>
-            <ScanProgress
-              phase={state.phase}
-              itemsProcessed={state.itemsProcessed}
-              totalEstimate={state.totalEstimate}
-              message={state.message}
-              onPause={handlePauseScan}
-            />
-            {provisionalGroups.length > 0 && (
-              <Box sx={{ mt: 3 }}>
-                <Alert severity="info" sx={{ mb: 2 }}>
-                  Showing provisional duplicate groups while the scan continues.
-                  Trash actions unlock after the scan completes.
+          <Box sx={{ minWidth: 0, flex: 1, width: "100%" }}>
+            {state.status === "connecting" && (
+              <Box sx={{ display: "flex", justifyContent: "center", pt: 10 }}>
+                <CircularProgress disableShrink />
+              </Box>
+            )}
+
+            {state.status === "disconnected" && (
+              <Box
+                sx={{
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  pt: 8,
+                  gap: 2
+                }}>
+                <Alert severity="error" sx={{ maxWidth: 480, width: "100%" }}>
+                  {state.error}
                 </Alert>
+                <Box sx={{ display: "flex", gap: 1 }}>
+                  <Button
+                    variant="contained"
+                    href={providerUrl(settings.sourceProvider)}
+                    target="_blank"
+                    rel="noopener noreferrer">
+                    Open {providerLabel(settings.sourceProvider)}
+                  </Button>
+                  {(settings.sourceProvider ?? "google") !== "icloud" && (
+                    <Button
+                      variant="outlined"
+                      onClick={() =>
+                        setSettings({
+                          sourceProvider: "icloud",
+                          albumScope: undefined
+                        })
+                      }>
+                      Use iCloud Photos
+                    </Button>
+                  )}
+                  {(settings.sourceProvider ?? "google") !== "google" && (
+                    <Button
+                      variant="outlined"
+                      onClick={() =>
+                        setSettings({
+                          sourceProvider: "google"
+                        })
+                      }>
+                      Use Google Photos
+                    </Button>
+                  )}
+                  <Button variant="outlined" onClick={handleReset}>
+                    Retry Connection
+                  </Button>
+                </Box>
+                <Typography variant="caption" color="text.secondary">
+                  Return here once {providerLabel(settings.sourceProvider)} is
+                  open and you're signed in.
+                </Typography>
+              </Box>
+            )}
+
+            {state.status === "connected" && (
+              <ScanConfig
+                settings={settings}
+                onSettingsChange={setSettings}
+                onStartScan={handleStartScan}
+                onResumeScan={handleResumeScan}
+                onDismissResume={handleDismissResume}
+                onClearCache={handleClearCache}
+                onRebuildCache={handleRebuildCache}
+                onExportCacheDiagnostics={handleExportCacheDiagnostics}
+                hasGptk={state.hasGptk}
+                cacheEntryCount={cacheEntryCount}
+                cacheStatus={cacheStatus}
+                cacheBusy={cacheBusy}
+                resumeCheckpoint={resumeCheckpoint}
+                albums={albums}
+                albumsLoading={albumsLoading}
+                albumsError={albumsError}
+                onRefreshAlbums={() => requestAlbums(state.accountEmail)}
+              />
+            )}
+
+            {state.status === "scanning" && (
+              <>
+                <ScanProgress
+                  phase={state.phase}
+                  itemsProcessed={state.itemsProcessed}
+                  totalEstimate={state.totalEstimate}
+                  message={state.message}
+                  onPause={handlePauseScan}
+                />
+                {provisionalGroups.length > 0 && (
+                  <Box sx={{ mt: 3 }}>
+                    <Alert severity="info" sx={{ mb: 2 }}>
+                      Showing possible duplicate sets while the scan continues.
+                      Trash actions unlock after the scan completes.
+                    </Alert>
+                    <DuplicateGroups
+                      groups={provisionalGroups}
+                      mediaItems={displayMediaItems}
+                      selectedGroupIds={new Set()}
+                      onToggleGroup={() => {}}
+                      keptByGroupId={keptByGroupId}
+                      onToggleKept={() => {}}
+                      onTrashAll={() => {}}
+                      readOnly
+                      heading={`${provisionalGroups.length} Possible Duplicate Set${provisionalGroups.length !== 1 ? "s" : ""}`}
+                    />
+                  </Box>
+                )}
+              </>
+            )}
+
+            {state.status === "results" &&
+              groups.length === 0 &&
+              storageChecked && (
+                <Box
+                  sx={{
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    pt: 8,
+                    gap: 2
+                  }}>
+                  <Typography variant="h6" color="text.secondary">
+                    No duplicates found in your library.
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    For reuploads or copies taken years apart, use Full scan and
+                    move match sensitivity toward More matches.
+                  </Typography>
+                  <Button variant="contained" onClick={handleReset}>
+                    Change scan settings
+                  </Button>
+                </Box>
+              )}
+
+            {state.status === "results" && groups.length > 0 && (
+              <>
+                <ActionBar
+                  totalItems={state.totalItems}
+                  groupCount={visibleGroups.length}
+                  totalGroupCount={groups.length}
+                  exactGroupCount={exactGroupCount}
+                  similarGroupCount={similarGroupCount}
+                  duplicateCount={duplicateCount}
+                  reviewFilter={reviewFilter}
+                  onReviewFilterChange={setReviewFilter}
+                  onSelectAll={handleSelectAll}
+                  onDeselectAll={handleDeselectAll}
+                  onTrash={handleTrash}
+                  onRescan={handleReset}
+                  onExportJson={handleExportJson}
+                  onExportCsv={handleExportCsv}
+                  onApplyKeepStrategy={handleApplyKeepStrategy}
+                />
                 <DuplicateGroups
-                  groups={provisionalGroups}
+                  groups={visibleGroups}
                   mediaItems={displayMediaItems}
-                  selectedGroupIds={new Set()}
-                  onToggleGroup={() => {}}
+                  selectedGroupIds={selectedGroupIds}
+                  onToggleGroup={handleToggleGroup}
                   keptByGroupId={keptByGroupId}
-                  onToggleKept={() => {}}
-                  readOnly
-                  heading={`${provisionalGroups.length} Duplicate Group${provisionalGroups.length !== 1 ? "s" : ""} Found So Far`}
+                  onToggleKept={handleToggleKept}
+                  onTrashAll={handleTrashAllCopies}
+                />
+              </>
+            )}
+
+            {state.status === "trashing" && (
+              <Box sx={{ maxWidth: 480, mx: "auto", p: 4 }}>
+                <Typography variant="h5" fontWeight={600} gutterBottom>
+                  Moving to Trash
+                </Typography>
+                <Box
+                  sx={{ display: "flex", alignItems: "center", gap: 1, mb: 2 }}>
+                  <CircularProgress size={14} thickness={5} />
+                  <Typography variant="body2" color="text.secondary">
+                    {state.trashedSoFar > 0
+                      ? `${state.trashedSoFar.toLocaleString()} of ${state.totalToTrash.toLocaleString()} moved`
+                      : "Starting..."}
+                  </Typography>
+                </Box>
+                <LinearProgress
+                  variant="determinate"
+                  value={
+                    state.totalToTrash > 0
+                      ? (state.trashedSoFar / state.totalToTrash) * 100
+                      : 0
+                  }
                 />
               </Box>
             )}
-          </>
-        )}
-
-        {state.status === "results" &&
-          groups.length === 0 &&
-          storageChecked && (
-            <Box
-              sx={{
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                pt: 8,
-                gap: 2
-              }}>
-              <Typography variant="h6" color="text.secondary">
-                No duplicates found in your library.
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                For reuploads or copies taken years apart, use Full scan and
-                move the threshold toward More matches.
-              </Typography>
-              <Button variant="contained" onClick={handleReset}>
-                Back to Scan
-              </Button>
-            </Box>
-          )}
-
-        {state.status === "results" && groups.length > 0 && (
-          <>
-            <ActionBar
-              totalItems={state.totalItems}
-              groupCount={visibleGroups.length}
-              totalGroupCount={groups.length}
-              exactGroupCount={exactGroupCount}
-              similarGroupCount={similarGroupCount}
-              duplicateCount={duplicateCount}
-              reviewFilter={reviewFilter}
-              onReviewFilterChange={setReviewFilter}
-              onSelectAll={handleSelectAll}
-              onDeselectAll={handleDeselectAll}
-              onTrash={handleTrash}
-              onRescan={handleReset}
-              onExportJson={handleExportJson}
-              onExportCsv={handleExportCsv}
-              onApplyKeepStrategy={handleApplyKeepStrategy}
-            />
-            <DuplicateGroups
-              groups={visibleGroups}
-              mediaItems={displayMediaItems}
-              selectedGroupIds={selectedGroupIds}
-              onToggleGroup={handleToggleGroup}
-              keptByGroupId={keptByGroupId}
-              onToggleKept={handleToggleKept}
-            />
-          </>
-        )}
-
-        {state.status === "trashing" && (
-          <Box sx={{ maxWidth: 480, mx: "auto", p: 4 }}>
-            <Typography variant="h5" fontWeight={600} gutterBottom>
-              Moving to Trash
-            </Typography>
-            <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 2 }}>
-              <CircularProgress size={14} thickness={5} />
-              <Typography variant="body2" color="text.secondary">
-                {state.trashedSoFar > 0
-                  ? `${state.trashedSoFar.toLocaleString()} of ${state.totalToTrash.toLocaleString()} moved`
-                  : "Starting…"}
-              </Typography>
-            </Box>
-            <LinearProgress
-              variant={state.trashedSoFar > 0 ? "determinate" : "indeterminate"}
-              value={Math.round(
-                (state.trashedSoFar / state.totalToTrash) * 100
-              )}
-            />
           </Box>
-        )}
+        </Box>
       </Box>
 
       {/* Trash confirm dialog */}

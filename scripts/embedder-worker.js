@@ -4004,11 +4004,42 @@
 
   // workers/embedder.worker.ts
   var embedder = null;
+  var mediaPipeConsoleFilterInstalled = false;
+  var canEmbedImageBitmap = null;
+  function installMediaPipeConsoleFilter() {
+    if (mediaPipeConsoleFilterInstalled) return;
+    mediaPipeConsoleFilterInstalled = true;
+    const originalError = console.error.bind(console);
+    console.error = (...args) => {
+      const message = args.map((arg) => String(arg)).join(" ");
+      if (message.includes("gl_context.cc:1118") && message.includes("OpenGL error checking is disabled")) {
+        return;
+      }
+      originalError(...args);
+    };
+  }
+  function embedBitmap(bitmap) {
+    if (canEmbedImageBitmap !== false) {
+      try {
+        const result = embedder.embed(bitmap);
+        canEmbedImageBitmap = true;
+        return result;
+      } catch (error) {
+        if (canEmbedImageBitmap === true) throw error;
+        canEmbedImageBitmap = false;
+      }
+    }
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(bitmap, 0, 0);
+    return embedder.embed(ctx.getImageData(0, 0, bitmap.width, bitmap.height));
+  }
   self.addEventListener("message", async (event) => {
     const { type, data } = event.data;
     if (type === "init") {
       try {
         const { wasmLoaderUrl, wasmBinaryUrl, modelBuffer } = data;
+        installMediaPipeConsoleFilter();
         importScripts(wasmLoaderUrl);
         const vision = {
           wasmLoaderPath: "",
@@ -4029,21 +4060,19 @@
       const { items } = data;
       const results = [];
       for (const { localIdx, blob } of items) {
+        let bitmap = null;
         try {
-          const bitmap = await createImageBitmap(blob);
-          const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
-          const ctx = canvas.getContext("2d");
-          ctx.drawImage(bitmap, 0, 0);
-          const imageData = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
-          const result = embedder.embed(imageData);
+          bitmap = await createImageBitmap(blob);
+          const result = embedBitmap(bitmap);
           if (result?.embeddings?.[0]?.floatEmbedding) {
             const buf = new Float32Array(
               result.embeddings[0].floatEmbedding
             ).buffer.slice(0);
             results.push({ localIdx, embedding: buf });
           }
-          bitmap.close();
         } catch {
+        } finally {
+          bitmap?.close();
         }
       }
       const transferables = results.map((r2) => r2.embedding);

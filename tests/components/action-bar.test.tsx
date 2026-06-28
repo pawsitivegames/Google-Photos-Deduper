@@ -70,17 +70,19 @@ describe("ActionBar", () => {
   describe("stats display", () => {
     it("shows the total items scanned count", () => {
       renderActionBar({ totalItems: 12345 })
-      expect(screen.getByText("12,345 items scanned")).toBeInTheDocument()
+      expect(
+        screen.getByText("12,345 photos and videos checked")
+      ).toBeInTheDocument()
     })
 
     it("shows the duplicate group count (plural)", () => {
       renderActionBar({ groupCount: 5 })
-      expect(screen.getByText("5 duplicate groups")).toBeInTheDocument()
+      expect(screen.getByText("5 duplicate sets to review")).toBeInTheDocument()
     })
 
     it("shows singular 'duplicate group' when groupCount is 1", () => {
       renderActionBar({ groupCount: 1 })
-      expect(screen.getByText("1 duplicate group")).toBeInTheDocument()
+      expect(screen.getByText("1 duplicate set to review")).toBeInTheDocument()
     })
 
     it("shows filtered and total group counts when a filter is active", () => {
@@ -89,8 +91,8 @@ describe("ActionBar", () => {
         totalGroupCount: 5,
         reviewFilter: "exact"
       })
-      expect(screen.getByText("2 duplicate groups")).toBeInTheDocument()
-      expect(screen.getByText("5 total")).toBeInTheDocument()
+      expect(screen.getByText("2 duplicate sets to review")).toBeInTheDocument()
+      expect(screen.getByText("5 sets total")).toBeInTheDocument()
     })
   })
 
@@ -98,10 +100,10 @@ describe("ActionBar", () => {
     it("does not render action buttons when groupCount is 0", () => {
       renderActionBar({ groupCount: 0, totalGroupCount: 0 })
       expect(
-        screen.queryByRole("button", { name: /Re-scan/i })
+        screen.queryByRole("button", { name: /Scan again/i })
       ).not.toBeInTheDocument()
       expect(
-        screen.queryByRole("button", { name: /Select All/i })
+        screen.queryByRole("button", { name: /Include all/i })
       ).not.toBeInTheDocument()
       expect(
         screen.queryByRole("button", { name: /Trash/i })
@@ -111,27 +113,28 @@ describe("ActionBar", () => {
     it("renders action buttons when groupCount > 0", () => {
       renderActionBar({ groupCount: 2 })
       expect(
-        screen.getByRole("button", { name: /Re-scan/i })
+        screen.getByRole("button", { name: /Scan again/i })
       ).toBeInTheDocument()
       expect(
-        screen.getByRole("button", { name: /^JSON$/i })
-      ).toBeInTheDocument()
-      expect(screen.getByRole("button", { name: /^CSV$/i })).toBeInTheDocument()
-      // Use exact regex to avoid /Select All/i matching "Deselect All"
-      expect(
-        screen.getByRole("button", { name: /^Select All$/i })
+        screen.getByRole("button", { name: /^Export report$/i })
       ).toBeInTheDocument()
       expect(
-        screen.getByRole("button", { name: /^Deselect All$/i })
+        screen.getByRole("button", { name: /^Spreadsheet$/i })
+      ).toBeInTheDocument()
+      expect(
+        screen.getByRole("button", { name: /^Include all$/i })
+      ).toBeInTheDocument()
+      expect(
+        screen.getByRole("button", { name: /^Skip all$/i })
       ).toBeInTheDocument()
       expect(
         screen.getByRole("button", { name: /Auto Keep/i })
       ).toBeInTheDocument()
       expect(
-        screen.getByRole("button", { name: /All \(3\)/i })
+        screen.getByRole("button", { name: /All sets \(3\)/i })
       ).toBeInTheDocument()
       expect(
-        screen.getByRole("button", { name: /Exact \(2\)/i })
+        screen.getByRole("button", { name: /Identical \(2\)/i })
       ).toBeInTheDocument()
       expect(
         screen.getByRole("button", { name: /Similar \(1\)/i })
@@ -141,11 +144,11 @@ describe("ActionBar", () => {
     it("keeps filter buttons visible when the active filter has no groups", () => {
       renderActionBar({ groupCount: 0, totalGroupCount: 3 })
       expect(
-        screen.getByRole("button", { name: /All \(3\)/i })
+        screen.getByRole("button", { name: /All sets \(3\)/i })
       ).toBeInTheDocument()
       expect(screen.getByRole("button", { name: /Auto Keep/i })).toBeDisabled()
       expect(
-        screen.getByRole("button", { name: /^Select All$/i })
+        screen.getByRole("button", { name: /^Include all$/i })
       ).toBeDisabled()
     })
   })
@@ -176,27 +179,27 @@ describe("ActionBar", () => {
   })
 
   describe("callbacks", () => {
-    it("calls onRescan when Re-scan is clicked", () => {
+    it("calls onRescan when Scan again is clicked", () => {
       const { callbacks } = renderActionBar()
-      fireEvent.click(screen.getByRole("button", { name: /Re-scan/i }))
+      fireEvent.click(screen.getByRole("button", { name: /Scan again/i }))
       expect(callbacks.onRescan).toHaveBeenCalledOnce()
     })
 
-    it("calls onSelectAll when Select All is clicked", () => {
+    it("calls onSelectAll when Include all is clicked", () => {
       const { callbacks } = renderActionBar()
-      fireEvent.click(screen.getByRole("button", { name: /^Select All$/i }))
+      fireEvent.click(screen.getByRole("button", { name: /^Include all$/i }))
       expect(callbacks.onSelectAll).toHaveBeenCalledOnce()
     })
 
-    it("calls onDeselectAll when Deselect All is clicked", () => {
+    it("calls onDeselectAll when Skip all is clicked", () => {
       const { callbacks } = renderActionBar()
-      fireEvent.click(screen.getByRole("button", { name: /Deselect All/i }))
+      fireEvent.click(screen.getByRole("button", { name: /Skip all/i }))
       expect(callbacks.onDeselectAll).toHaveBeenCalledOnce()
     })
 
     it("calls onReviewFilterChange when a filter is clicked", () => {
       const { callbacks } = renderActionBar()
-      fireEvent.click(screen.getByRole("button", { name: /Exact \(2\)/i }))
+      fireEvent.click(screen.getByRole("button", { name: /Identical \(2\)/i }))
       expect(callbacks.onReviewFilterChange).toHaveBeenCalledWith("exact")
     })
 
@@ -210,8 +213,8 @@ describe("ActionBar", () => {
 
     it("calls export callbacks when report buttons are clicked", () => {
       const { callbacks } = renderActionBar()
-      fireEvent.click(screen.getByRole("button", { name: /^JSON$/i }))
-      fireEvent.click(screen.getByRole("button", { name: /^CSV$/i }))
+      fireEvent.click(screen.getByRole("button", { name: /^Export report$/i }))
+      fireEvent.click(screen.getByRole("button", { name: /^Spreadsheet$/i }))
       expect(callbacks.onExportJson).toHaveBeenCalledOnce()
       expect(callbacks.onExportCsv).toHaveBeenCalledOnce()
     })

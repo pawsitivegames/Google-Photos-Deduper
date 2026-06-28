@@ -8,7 +8,8 @@
  * @vitest-environment happy-dom
  */
 // @vitest-environment happy-dom
-import { describe, it, expect, vi, beforeEach, beforeAll } from "vitest"
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
+
 import { APP_ID } from "../../lib/types"
 
 // ============================================================
@@ -29,23 +30,26 @@ const tabRemovedListeners: TabRemovedListener[] = []
 const mockChrome = {
   action: {
     onClicked: {
-      addListener: vi.fn(),
-    },
+      addListener: vi.fn()
+    }
   },
   tabs: {
     query: vi.fn(),
     sendMessage: vi.fn(),
     create: vi.fn(),
+    update: vi.fn(),
     onRemoved: {
-      addListener: vi.fn((fn: TabRemovedListener) => tabRemovedListeners.push(fn)),
-    },
+      addListener: vi.fn((fn: TabRemovedListener) =>
+        tabRemovedListeners.push(fn)
+      )
+    }
   },
   runtime: {
     getURL: vi.fn((path: string) => `chrome-extension://test/${path}`),
     onMessage: {
-      addListener: vi.fn((fn: MessageListener) => messageListeners.push(fn)),
-    },
-  },
+      addListener: vi.fn((fn: MessageListener) => messageListeners.push(fn))
+    }
+  }
 }
 
 vi.stubGlobal("chrome", mockChrome)
@@ -84,6 +88,7 @@ function gpSender(tabId: number): Partial<chrome.runtime.MessageSender> {
 // Reset call history (not implementations) between tests
 beforeEach(() => {
   vi.clearAllMocks()
+  mockChrome.tabs.update.mockResolvedValue({})
 })
 
 // ============================================================
@@ -102,7 +107,6 @@ describe("healthCheck", () => {
 
     dispatchMessage({ app: APP_ID, action: "healthCheck" }, appSender())
     await new Promise((r) => setTimeout(r, 20))
-
     expect(mockChrome.tabs.sendMessage).toHaveBeenCalledWith(
       appTabId,
       expect.objectContaining({ action: "healthCheck.result", success: false })
@@ -119,7 +123,6 @@ describe("healthCheck", () => {
 
     dispatchMessage({ app: APP_ID, action: "healthCheck" }, appSender())
     await new Promise((r) => setTimeout(r, 20))
-
     expect(mockChrome.tabs.sendMessage).toHaveBeenCalledWith(
       appTabId,
       expect.objectContaining({ action: "healthCheck.result", success: false })
@@ -131,36 +134,43 @@ describe("healthCheck", () => {
     const appTabId = 20
 
     mockChrome.tabs.query.mockImplementation((query: { url?: string }) => {
-      if (query?.url?.includes("photos.google.com")) return Promise.resolve([{ id: gpTabId }])
+      if (query?.url?.includes("photos.google.com"))
+        return Promise.resolve([{ id: gpTabId }])
       return Promise.resolve([{ id: appTabId }])
     })
 
     // GPTK result arrives from GP tab after command is forwarded
-    mockChrome.tabs.sendMessage.mockImplementation((_tabId: number, msg: { command?: string; requestId?: string }) => {
-      if (msg?.command === "healthCheck") {
-        setTimeout(() => {
-          dispatchMessage(
-            {
-              app: APP_ID,
-              action: "gptkResult",
-              command: "healthCheck",
-              requestId: msg.requestId,
-              success: true,
-              data: { hasGptk: true, hasWizData: true },
-            },
-            gpSender(gpTabId)
-          )
-        }, 0)
+    mockChrome.tabs.sendMessage.mockImplementation(
+      (_tabId: number, msg: { command?: string; requestId?: string }) => {
+        if (msg?.command === "healthCheck") {
+          setTimeout(() => {
+            dispatchMessage(
+              {
+                app: APP_ID,
+                action: "gptkResult",
+                command: "healthCheck",
+                requestId: msg.requestId,
+                success: true,
+                data: { hasGptk: true, hasWizData: true }
+              },
+              gpSender(gpTabId)
+            )
+          }, 0)
+        }
+        return Promise.resolve()
       }
-      return Promise.resolve()
-    })
+    )
 
     dispatchMessage({ app: APP_ID, action: "healthCheck" }, appSender())
     await new Promise((r) => setTimeout(r, 30))
 
     expect(mockChrome.tabs.sendMessage).toHaveBeenCalledWith(
       appTabId,
-      expect.objectContaining({ action: "healthCheck.result", success: true, hasGptk: true })
+      expect.objectContaining({
+        action: "healthCheck.result",
+        success: true,
+        hasGptk: true
+      })
     )
   })
 })
@@ -191,7 +201,7 @@ describe("findGooglePhotosTab — multi-tab selection", () => {
       if (query?.url?.includes("photos.google.com"))
         return Promise.resolve([
           { id: unreachableId, active: false, lastAccessed: 200 },
-          { id: reachableId, active: false, lastAccessed: 100 },
+          { id: reachableId, active: false, lastAccessed: 100 }
         ])
       return Promise.resolve([{ id: appTabId }])
     })
@@ -217,7 +227,7 @@ describe("findGooglePhotosTab — multi-tab selection", () => {
                 command: "healthCheck",
                 requestId: msg.requestId,
                 success: true,
-                data: { hasGptk: true, hasWizData: true },
+                data: { hasGptk: true, hasWizData: true }
               },
               gpSender(reachableId)
             )
@@ -255,7 +265,7 @@ describe("findGooglePhotosTab — multi-tab selection", () => {
       if (query?.url?.includes("photos.google.com"))
         return Promise.resolve([
           { id: inactiveId, active: false, lastAccessed: 999 },
-          { id: activeId, active: true, lastAccessed: 1 },
+          { id: activeId, active: true, lastAccessed: 1 }
         ])
       return Promise.resolve([{ id: appTabId }])
     })
@@ -299,7 +309,7 @@ describe("findGooglePhotosTab — multi-tab selection", () => {
                 command: "healthCheck",
                 requestId: msg.requestId,
                 success: true,
-                data: { hasGptk: true, hasWizData: true },
+                data: { hasGptk: true, hasWizData: true }
               },
               gpSender(gpTabId)
             )
@@ -335,7 +345,7 @@ describe("findGooglePhotosTab — multi-tab selection", () => {
       if (query?.url?.includes("photos.google.com"))
         return Promise.resolve([
           { id: tabA, active: false, lastAccessed: 2 },
-          { id: tabB, active: false, lastAccessed: 1 },
+          { id: tabB, active: false, lastAccessed: 1 }
         ])
       return Promise.resolve([{ id: appTabId }])
     })
@@ -374,13 +384,20 @@ describe("gptkCommand routing", () => {
     const requestId = "test-req-1"
 
     mockChrome.tabs.query.mockImplementation((query: { url?: string }) => {
-      if (query?.url?.includes("photos.google.com")) return Promise.resolve([{ id: gpTabId }])
+      if (query?.url?.includes("photos.google.com"))
+        return Promise.resolve([{ id: gpTabId }])
       return Promise.resolve([{ id: appTabId }])
     })
     mockChrome.tabs.sendMessage.mockResolvedValue(undefined)
 
     dispatchMessage(
-      { app: APP_ID, action: "gptkCommand", command: "getAllMediaItems", requestId, args: {} },
+      {
+        app: APP_ID,
+        action: "gptkCommand",
+        command: "getAllMediaItems",
+        requestId,
+        args: {}
+      },
       appSender()
     )
     await new Promise((r) => setTimeout(r, 20))
@@ -391,20 +408,66 @@ describe("gptkCommand routing", () => {
     )
   })
 
+  it("routes iCloud scan commands to an iCloud Photos tab", async () => {
+    const appTabId = 71
+    const icloudTabId = 72
+    const requestId = "test-icloud-scan"
+
+    mockChrome.tabs.query.mockImplementation((query: { url?: string }) => {
+      if (query?.url?.includes("icloud.com"))
+        return Promise.resolve([{ id: icloudTabId, active: true }])
+      if (query?.url?.includes("photos.google.com")) return Promise.resolve([])
+      return Promise.resolve([{ id: appTabId }])
+    })
+    mockChrome.tabs.sendMessage.mockResolvedValue(undefined)
+
+    dispatchMessage(
+      {
+        app: APP_ID,
+        action: "gptkCommand",
+        command: "getAllMediaItems",
+        provider: "icloud",
+        requestId,
+        args: {}
+      },
+      appSender()
+    )
+    await new Promise((r) => setTimeout(r, 1600))
+
+    expect(mockChrome.tabs.update).toHaveBeenCalledWith(icloudTabId, {
+      active: true
+    })
+    expect(mockChrome.tabs.sendMessage).toHaveBeenCalledWith(
+      icloudTabId,
+      expect.objectContaining({
+        command: "getAllMediaItems",
+        provider: "icloud",
+        requestId
+      })
+    )
+  })
+
   it("relays gptkResult from GP tab back to app tab", async () => {
     const gpTabId = 10
     const appTabId = 20
     const requestId = "test-req-2"
 
     mockChrome.tabs.query.mockImplementation((query: { url?: string }) => {
-      if (query?.url?.includes("photos.google.com")) return Promise.resolve([{ id: gpTabId }])
+      if (query?.url?.includes("photos.google.com"))
+        return Promise.resolve([{ id: gpTabId }])
       return Promise.resolve([{ id: appTabId }])
     })
     mockChrome.tabs.sendMessage.mockResolvedValue(undefined)
 
     // First send a command so the SW registers the pending requestId → appTabId mapping
     dispatchMessage(
-      { app: APP_ID, action: "gptkCommand", command: "getAllMediaItems", requestId, args: {} },
+      {
+        app: APP_ID,
+        action: "gptkCommand",
+        command: "getAllMediaItems",
+        requestId,
+        args: {}
+      },
       appSender()
     )
     await new Promise((r) => setTimeout(r, 20))
@@ -418,7 +481,7 @@ describe("gptkCommand routing", () => {
         command: "getAllMediaItems",
         requestId,
         success: true,
-        data: [],
+        data: []
       },
       gpSender(gpTabId)
     )
@@ -426,7 +489,11 @@ describe("gptkCommand routing", () => {
 
     expect(mockChrome.tabs.sendMessage).toHaveBeenCalledWith(
       appTabId,
-      expect.objectContaining({ action: "gptkResult", command: "getAllMediaItems", success: true })
+      expect.objectContaining({
+        action: "gptkResult",
+        command: "getAllMediaItems",
+        success: true
+      })
     )
   })
 
@@ -440,7 +507,13 @@ describe("gptkCommand routing", () => {
     })
 
     dispatchMessage(
-      { app: APP_ID, action: "gptkCommand", command: "trashItems", requestId: "req-err-2", args: {} },
+      {
+        app: APP_ID,
+        action: "gptkCommand",
+        command: "trashItems",
+        requestId: "req-err-2",
+        args: {}
+      },
       appSender()
     )
     await new Promise((r) => setTimeout(r, 20))
@@ -476,7 +549,7 @@ describe("gptkCommand routing", () => {
         action: "gptkCommand",
         command: "getAllMediaItems",
         requestId,
-        args: {},
+        args: {}
       },
       appSender()
     )
@@ -513,7 +586,7 @@ describe("gptkCommand routing", () => {
         action: "gptkCommand",
         command: "getAllMediaItems",
         requestId,
-        args: {},
+        args: {}
       },
       appSender()
     )
@@ -527,7 +600,7 @@ describe("gptkCommand routing", () => {
         command: "getAllMediaItems",
         requestId,
         itemsProcessed: 25,
-        message: "Fetched 25",
+        message: "Fetched 25"
       },
       gpSender(gpTabId)
     )
@@ -539,7 +612,7 @@ describe("gptkCommand routing", () => {
         action: "gptkProgress",
         command: "getAllMediaItems",
         requestId,
-        itemsProcessed: 25,
+        itemsProcessed: 25
       })
     )
   })

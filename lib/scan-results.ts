@@ -4,14 +4,27 @@
  * (health check) so future invalidation conditions only need to be added here.
  */
 export function areScanResultsValid(
-  stored: { accountEmail?: string },
-  context: { accountEmail?: string },
+  stored: { accountEmail?: string; sourceProvider?: string },
+  context: { accountEmail?: string; sourceProvider?: string }
 ): boolean {
+  const storedProvider = stored.sourceProvider ?? "google"
+  const contextProvider = context.sourceProvider ?? "google"
+  if (storedProvider !== contextProvider) return false
   // Once the current account is known, unknown-account saved results are not
   // safe to reuse for review/trash actions.
-  if (!stored.accountEmail && context.accountEmail) return false;
+  if (
+    contextProvider === "google" &&
+    !stored.accountEmail &&
+    context.accountEmail
+  )
+    return false
   // Account mismatch: results belong to a different account
-  if (stored.accountEmail && context.accountEmail && stored.accountEmail !== context.accountEmail)
-    return false;
-  return true;
+  if (
+    contextProvider === "google" &&
+    stored.accountEmail &&
+    context.accountEmail &&
+    stored.accountEmail !== context.accountEmail
+  )
+    return false
+  return true
 }

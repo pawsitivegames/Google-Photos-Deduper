@@ -59,6 +59,76 @@ describe("duplicate classifier", () => {
     expect(result.duplicateKind).toBe("similar")
   })
 
+  it("classifies strong video metadata matches as exact without requiring same taken date", () => {
+    const result = classifyDuplicateItems([
+      item("a", {
+        fileName: "clip.mov",
+        timestamp: Date.parse("2021-01-01"),
+        duration: 12_345
+      }),
+      item("b", {
+        fileName: "clip.mov",
+        timestamp: Date.parse("2024-01-01"),
+        duration: 12_345
+      })
+    ])
+
+    expect(result.duplicateKind).toBe("exact")
+    expect(result.matchReasons).toEqual(
+      expect.arrayContaining([
+        "same filename",
+        "same dimensions",
+        "same duration"
+      ])
+    )
+  })
+
+  it("classifies video filename stem and duration matches as exact when extensions differ", () => {
+    const result = classifyDuplicateItems([
+      item("a", {
+        fileName: "clip.mov",
+        resWidth: 1920,
+        resHeight: 1080,
+        duration: 12_345
+      }),
+      item("b", {
+        fileName: "clip.mp4",
+        resWidth: 1280,
+        resHeight: 720,
+        duration: 12_345
+      })
+    ])
+
+    expect(result.duplicateKind).toBe("exact")
+    expect(result.matchReasons).toEqual(
+      expect.arrayContaining(["same filename stem", "same duration"])
+    )
+  })
+
+  it("classifies video size and duration matches as exact when dimensions are missing", () => {
+    const result = classifyDuplicateItems([
+      item("a", {
+        fileName: undefined,
+        resWidth: undefined,
+        resHeight: undefined,
+        size: 3_500_000,
+        duration: 12_345
+      }),
+      item("b", {
+        fileName: undefined,
+        resWidth: undefined,
+        resHeight: undefined,
+        size: 3_500_000,
+        duration: 12_345
+      })
+    ])
+
+    expect(result.duplicateKind).toBe("exact")
+    expect(result.matchReasons).toEqual(
+      expect.arrayContaining(["same file size", "same duration"])
+    )
+  })
+
   it("classifies groups from media keys", () => {
     const group: DuplicateGroup = {
       id: "g1",

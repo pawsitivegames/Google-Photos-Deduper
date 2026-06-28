@@ -23,6 +23,43 @@
 import { ImageEmbedder } from "@mediapipe/tasks-vision";
 
 let embedder: ImageEmbedder | null = null;
+let mediaPipeConsoleFilterInstalled = false;
+let canEmbedImageBitmap: boolean | null = null;
+
+function installMediaPipeConsoleFilter(): void {
+  if (mediaPipeConsoleFilterInstalled) return;
+  mediaPipeConsoleFilterInstalled = true;
+
+  const originalError = console.error.bind(console);
+  console.error = (...args: unknown[]) => {
+    const message = args.map((arg) => String(arg)).join(" ");
+    if (
+      message.includes("gl_context.cc:1118") &&
+      message.includes("OpenGL error checking is disabled")
+    ) {
+      return;
+    }
+    originalError(...args);
+  };
+}
+
+function embedBitmap(bitmap: ImageBitmap) {
+  if (canEmbedImageBitmap !== false) {
+    try {
+      const result = embedder!.embed(bitmap);
+      canEmbedImageBitmap = true;
+      return result;
+    } catch (error) {
+      if (canEmbedImageBitmap === true) throw error;
+      canEmbedImageBitmap = false;
+    }
+  }
+
+  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  const ctx = canvas.getContext("2d")!;
+  ctx.drawImage(bitmap, 0, 0);
+  return embedder!.embed(ctx.getImageData(0, 0, bitmap.width, bitmap.height));
+}
 
 self.addEventListener("message", async (event: MessageEvent) => {
   const { type, data } = event.data;
@@ -38,6 +75,7 @@ self.addEventListener("message", async (event: MessageEvent) => {
       // Pre-load the WASM loader JS via importScripts (CSP-safe from extension origin).
       // This is the same workaround as the main thread: load the global manually so
       // MediaPipe can find it, then pass wasmLoaderPath: "" to skip its own injection.
+      installMediaPipeConsoleFilter();
       importScripts(wasmLoaderUrl);
 
       const vision = {
@@ -66,14 +104,10 @@ self.addEventListener("message", async (event: MessageEvent) => {
     const results: Array<{ localIdx: number; embedding: ArrayBuffer }> = [];
 
     for (const { localIdx, blob } of items) {
+      let bitmap: ImageBitmap | null = null;
       try {
-        const bitmap = await createImageBitmap(blob);
-        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
-        const ctx = canvas.getContext("2d")!;
-        ctx.drawImage(bitmap, 0, 0);
-        const imageData = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
-
-        const result = embedder!.embed(imageData);
+        bitmap = await createImageBitmap(blob);
+        const result = embedBitmap(bitmap);
         if (result?.embeddings?.[0]?.floatEmbedding) {
           // .slice(0) to detach the buffer from any shared backing store before transfer
           const buf = new Float32Array(
@@ -81,10 +115,10 @@ self.addEventListener("message", async (event: MessageEvent) => {
           ).buffer.slice(0);
           results.push({ localIdx, embedding: buf });
         }
-
-        bitmap.close();
       } catch {
         // Skip unprocessable images
+      } finally {
+        bitmap?.close();
       }
     }
 

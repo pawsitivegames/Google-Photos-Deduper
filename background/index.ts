@@ -2,8 +2,9 @@ import { APP_ID } from "../lib/types"
 import type {
   AppMessage,
   GptkCommandMessage,
-  GptkResultMessage,
   GptkProgressMessage,
+  GptkResultMessage,
+  PhotoProvider
 } from "../lib/types"
 
 // Service worker for Google Photos Deduper.
@@ -11,6 +12,7 @@ import type {
 
 // Bidirectional tab mapping: appTabId <-> gpTabId
 const tabMap: Record<number, number> = {}
+const tabProviderMap: Record<number, PhotoProvider> = {}
 
 // Pending GPTK command callbacks, keyed by requestId
 const pendingCommands: Record<
@@ -21,6 +23,20 @@ const pendingCommands: Record<
     appTabId: number | null
   }
 > = {}
+
+function providerTabPattern(provider: PhotoProvider = "google"): string {
+  return provider === "icloud"
+    ? "https://www.icloud.com/*"
+    : "https://photos.google.com/*"
+}
+
+function providerName(provider: PhotoProvider = "google"): string {
+  return provider === "icloud" ? "iCloud Photos" : "Google Photos"
+}
+
+function providerOpenUrl(provider: PhotoProvider = "google"): string {
+  return provider === "icloud" ? "icloud.com/photos" : "photos.google.com"
+}
 
 function hasTabId(tab: Pick<chrome.tabs.Tab, "id">): tab is chrome.tabs.Tab & {
   id: number
@@ -47,8 +63,10 @@ function hasTabId(tab: Pick<chrome.tabs.Tab, "id">): tab is chrome.tabs.Tab & {
  * unrecognized actions, so a no-op ping resolves with undefined when reachable
  * and rejects when no content script is present.
  */
-async function findGooglePhotosTab(): Promise<chrome.tabs.Tab | null> {
-  const tabs = await chrome.tabs.query({ url: "https://photos.google.com/*" })
+async function findProviderTab(
+  provider: PhotoProvider = "google"
+): Promise<chrome.tabs.Tab | null> {
+  const tabs = await chrome.tabs.query({ url: providerTabPattern(provider) })
   if (tabs.length === 0) return null
 
   // `lastAccessed` is available in Chrome 121+ but missing from this version
@@ -66,7 +84,7 @@ async function findGooglePhotosTab(): Promise<chrome.tabs.Tab | null> {
     try {
       await chrome.tabs.sendMessage(candidate.id, {
         app: APP_ID,
-        action: "ping",
+        action: "ping"
       })
       return candidate
     } catch {
@@ -76,21 +94,36 @@ async function findGooglePhotosTab(): Promise<chrome.tabs.Tab | null> {
   return null
 }
 
-async function getReachableMappedGooglePhotosTabId(
-  senderTabId: number
+async function getReachableMappedProviderTabId(
+  senderTabId: number,
+  provider: PhotoProvider = "google"
 ): Promise<number | null> {
   const mappedTabId = tabMap[senderTabId]
   if (mappedTabId === undefined) return null
+  if (mappedTabId === senderTabId) {
+    delete tabMap[senderTabId]
+    delete tabProviderMap[senderTabId]
+    return null
+  }
+  if (tabProviderMap[senderTabId] !== provider) {
+    delete tabMap[mappedTabId]
+    delete tabMap[senderTabId]
+    delete tabProviderMap[mappedTabId]
+    delete tabProviderMap[senderTabId]
+    return null
+  }
 
   try {
     await chrome.tabs.sendMessage(mappedTabId, {
       app: APP_ID,
-      action: "ping",
+      action: "ping"
     })
     return mappedTabId
   } catch {
     delete tabMap[senderTabId]
     delete tabMap[mappedTabId]
+    delete tabProviderMap[senderTabId]
+    delete tabProviderMap[mappedTabId]
     return null
   }
 }
@@ -123,10 +156,15 @@ function generateRequestId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 async function sendGptkCommand(
   gpTabId: number,
   command: string,
-  args?: unknown
+  args?: unknown,
+  provider: PhotoProvider = "google"
 ): Promise<unknown> {
   const requestId = generateRequestId()
 
@@ -136,6 +174,7 @@ async function sendGptkCommand(
     command,
     requestId,
     args,
+    provider
   }
 
   return new Promise((resolve, reject) => {
@@ -143,7 +182,7 @@ async function sendGptkCommand(
     chrome.tabs.sendMessage(gpTabId, message).catch(() => {
       delete pendingCommands[requestId]
       reject(
-        "Unable to connect to Google Photos tab. Please reload the tab and try again."
+        `Unable to connect to ${providerName(provider)} tab. Please reload the tab and try again.`
       )
     })
   })
@@ -162,7 +201,7 @@ chrome.runtime.onMessage.addListener(
         handleLaunchApp(sender)
         break
       case "healthCheck":
-        handleHealthCheck(sender)
+        handleHealthCheck(message, sender)
         break
       case "gptkCommand":
         handleGptkCommand(message as GptkCommandMessage, sender)
@@ -185,7 +224,7 @@ async function handleLaunchApp(
   sender: chrome.runtime.MessageSender
 ): Promise<void> {
   const appTab = await chrome.tabs.create({
-    url: chrome.runtime.getURL("tabs/app.html"),
+    url: chrome.runtime.getURL("tabs/app.html")
   })
   if (
     sender.tab?.id !== undefined &&
@@ -198,39 +237,50 @@ async function handleLaunchApp(
 }
 
 async function handleHealthCheck(
+  message: AppMessage,
   sender: chrome.runtime.MessageSender
 ): Promise<void> {
+  const provider =
+    message.action === "healthCheck" ? message.provider ?? "google" : "google"
   const senderTabId = await getSenderTabId(sender)
 
-  const gpTab = await findGooglePhotosTab()
-  if (!gpTab || !hasTabId(gpTab)) {
+  const providerTab = await findProviderTab(provider)
+  if (!providerTab || !hasTabId(providerTab)) {
     if (senderTabId !== null) {
       chrome.tabs.sendMessage(senderTabId, {
         app: APP_ID,
         action: "healthCheck.result",
+        provider,
         success: false,
-        hasGptk: false,
+        hasGptk: false
       })
     }
     return
   }
 
-  // Map the app tab to the GP tab
   if (senderTabId !== null) {
-    tabMap[senderTabId] = gpTab.id
-    tabMap[gpTab.id] = senderTabId
+    tabMap[senderTabId] = providerTab.id
+    tabMap[providerTab.id] = senderTabId
+    tabProviderMap[senderTabId] = provider
+    tabProviderMap[providerTab.id] = provider
   }
 
   try {
-    const result = await sendGptkCommand(gpTab.id, "healthCheck")
+    const result = await sendGptkCommand(
+      providerTab.id,
+      "healthCheck",
+      undefined,
+      provider
+    )
     if (senderTabId !== null) {
       const r = result as { hasGptk: boolean; accountEmail?: string }
       chrome.tabs.sendMessage(senderTabId, {
         app: APP_ID,
         action: "healthCheck.result",
+        provider,
         success: true,
         hasGptk: r.hasGptk,
-        accountEmail: r.accountEmail,
+        accountEmail: r.accountEmail
       })
     }
   } catch {
@@ -238,8 +288,9 @@ async function handleHealthCheck(
       chrome.tabs.sendMessage(senderTabId, {
         app: APP_ID,
         action: "healthCheck.result",
+        provider,
         success: false,
-        hasGptk: false,
+        hasGptk: false
       })
     }
   }
@@ -251,44 +302,51 @@ async function handleGptkCommand(
 ): Promise<void> {
   const senderTabId = await getSenderTabId(sender)
   if (senderTabId === null) return
+  const provider = message.provider ?? "google"
 
-  // Find the GP tab for this sender
-  let gpTabId = await getReachableMappedGooglePhotosTabId(senderTabId)
-  if (gpTabId === null) {
-    const gpTab = await findGooglePhotosTab()
-    if (!gpTab || !hasTabId(gpTab)) {
+  let providerTabId = await getReachableMappedProviderTabId(
+    senderTabId,
+    provider
+  )
+  if (providerTabId === null) {
+    const providerTab = await findProviderTab(provider)
+    if (!providerTab || !hasTabId(providerTab)) {
       chrome.tabs.sendMessage(senderTabId, {
         app: APP_ID,
         action: "gptkResult",
         command: message.command,
         requestId: message.requestId,
         success: false,
-        error: "Google Photos tab not found. Please open photos.google.com.",
+        error: `${providerName(provider)} tab not found. Please open ${providerOpenUrl(provider)}.`
       } as GptkResultMessage)
       return
     }
-    gpTabId = gpTab.id
-    tabMap[senderTabId] = gpTabId
-    tabMap[gpTabId] = senderTabId
+    providerTabId = providerTab.id
+    tabMap[senderTabId] = providerTabId
+    tabMap[providerTabId] = senderTabId
+    tabProviderMap[senderTabId] = provider
+    tabProviderMap[providerTabId] = provider
   }
 
-  // Store the sender so we can relay results back
   pendingCommands[message.requestId] = {
     resolve: () => {},
     reject: () => {},
-    appTabId: senderTabId,
+    appTabId: senderTabId
   }
 
-  // Forward the command to the GP tab (bridge will relay to MAIN world)
-  chrome.tabs.sendMessage(gpTabId, message).catch(() => {
+  if (provider === "icloud" && message.command === "getAllMediaItems") {
+    await chrome.tabs.update(providerTabId, { active: true }).catch(() => {})
+    await sleep(1500)
+  }
+
+  chrome.tabs.sendMessage(providerTabId, message).catch(() => {
     chrome.tabs.sendMessage(senderTabId, {
       app: APP_ID,
       action: "gptkResult",
       command: message.command,
       requestId: message.requestId,
       success: false,
-      error:
-        "Unable to connect to Google Photos tab. Please reload the tab and try again.",
+      error: `Unable to connect to ${providerName(provider)} tab. Please reload the tab and try again.`
     } as GptkResultMessage)
     delete pendingCommands[message.requestId]
   })
@@ -335,6 +393,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   const mappedTabId = tabMap[tabId]
   if (mappedTabId !== undefined) {
     delete tabMap[mappedTabId]
+    delete tabProviderMap[mappedTabId]
 
     // If a GP tab closed, notify the app tab
     chrome.tabs
@@ -342,13 +401,14 @@ chrome.tabs.onRemoved.addListener((tabId) => {
         app: APP_ID,
         action: "gptkLog",
         level: "error",
-        message: "Google Photos tab was closed.",
+        message: "Connected photo source tab was closed."
       })
       .catch(() => {
         // App tab may also be gone
       })
   }
   delete tabMap[tabId]
+  delete tabProviderMap[tabId]
 
   // Clean up any pending commands from this tab
   for (const [reqId, cmd] of Object.entries(pendingCommands)) {
