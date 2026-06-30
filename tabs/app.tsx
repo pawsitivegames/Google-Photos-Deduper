@@ -2,13 +2,17 @@ import "@fontsource/dm-sans/400.css"
 import "@fontsource/dm-sans/500.css"
 import "@fontsource/dm-sans/700.css"
 
+import CheckCircleRoundedIcon from "@mui/icons-material/CheckCircleRounded"
 import CloseIcon from "@mui/icons-material/Close"
 import CollectionsRoundedIcon from "@mui/icons-material/CollectionsRounded"
 import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded"
 import DoneAllRoundedIcon from "@mui/icons-material/DoneAllRounded"
+import LockOutlinedIcon from "@mui/icons-material/LockOutlined"
+import OpenInNewRoundedIcon from "@mui/icons-material/OpenInNewRounded"
 import PhotoLibraryRoundedIcon from "@mui/icons-material/PhotoLibraryRounded"
 import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded"
 import RefreshRoundedIcon from "@mui/icons-material/RefreshRounded"
+import SearchRoundedIcon from "@mui/icons-material/SearchRounded"
 import Alert from "@mui/material/Alert"
 import AppBar from "@mui/material/AppBar"
 import Box from "@mui/material/Box"
@@ -20,8 +24,10 @@ import DialogActions from "@mui/material/DialogActions"
 import DialogContent from "@mui/material/DialogContent"
 import DialogContentText from "@mui/material/DialogContentText"
 import DialogTitle from "@mui/material/DialogTitle"
+import GlobalStyles from "@mui/material/GlobalStyles"
 import IconButton from "@mui/material/IconButton"
 import LinearProgress from "@mui/material/LinearProgress"
+import MenuItem from "@mui/material/MenuItem"
 import Snackbar from "@mui/material/Snackbar"
 import { ThemeProvider } from "@mui/material/styles"
 import TextField from "@mui/material/TextField"
@@ -37,6 +43,7 @@ import {
   useState,
   type Dispatch,
   type MutableRefObject,
+  type ReactNode,
   type SetStateAction
 } from "react"
 
@@ -86,6 +93,8 @@ import type {
   GptkProgressMessage,
   GptkResultMessage,
   HealthCheckResultMessage,
+  LaunchProviderResult,
+  PhotoProvider,
   ScanSettings,
   StoredState
 } from "../lib/types"
@@ -98,13 +107,14 @@ import type {
 // opened app tab because the bridge content script on photos.google.com has
 // not finished loading yet, or because the MV3 service worker is still
 // spinning up from idle. Backoff: 400ms, 800ms, 1600ms, 3200ms (5 attempts).
-const HEALTH_CHECK_MAX_ATTEMPTS = 5
+const HEALTH_CHECK_MAX_ATTEMPTS = 2
 const TRASH_BATCH_SIZE = 25
 const TRASH_BATCH_PAUSE_MS = 1000
 const TRASH_RETRY_COUNT = 2
 const TRASH_RETRY_BACKOFF_MS = 1000
 const DELETE_REPORTS_KEY = "deleteReports"
 const TRASH_RESULT_REPORTS_KEY = "trashResultReports"
+const APP_CLIENT_ID = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 
 function WorkflowRail({
   stage,
@@ -114,7 +124,8 @@ function WorkflowRail({
   similarGroupCount,
   duplicateCount,
   scanDetail,
-  onRescan
+  onRescan,
+  compact = false
 }: {
   stage: "setup" | "scan" | "review" | "trash" | "done"
   totalItems: number
@@ -124,6 +135,7 @@ function WorkflowRail({
   duplicateCount: number
   scanDetail?: string
   onRescan: () => void
+  compact?: boolean
 }) {
   const stageIndex = {
     setup: 0,
@@ -180,7 +192,7 @@ function WorkflowRail({
     },
     {
       icon: <DeleteOutlineRoundedIcon fontSize="small" />,
-      label: "Trash safely",
+      label: compact ? "Trash" : "Trash safely",
       value:
         stage === "trash"
           ? `${duplicateCount.toLocaleString()} moving`
@@ -196,20 +208,25 @@ function WorkflowRail({
     <Box
       component="aside"
       sx={{
-        position: { md: "sticky" },
-        top: { md: 88 },
+        position: compact ? "static" : { md: "sticky" },
+        top: compact ? "auto" : { md: 88 },
         alignSelf: "flex-start",
-        width: { xs: "100%", md: 272 },
+        width: compact ? "100%" : { xs: "100%", md: 272 },
         flexShrink: 0,
         border: "1px solid",
         borderColor: "divider",
-        borderRadius: 3,
-        bgcolor: "rgba(255,255,255,0.72)",
-        backdropFilter: "saturate(180%) blur(22px)",
+        borderRadius: compact ? 2 : 3,
+        bgcolor: compact ? "#FFFFFF" : "rgba(255,255,255,0.72)",
+        backdropFilter: compact ? "none" : "saturate(180%) blur(22px)",
         overflow: "hidden",
-        boxShadow: "0 20px 56px rgba(0, 0, 0, 0.08)"
+        boxShadow: compact ? "none" : "0 20px 56px rgba(0, 0, 0, 0.08)"
       }}>
-      <Box sx={{ p: 2.25, borderBottom: "1px solid", borderColor: "divider" }}>
+      <Box
+        sx={{
+          p: compact ? 1.25 : 2.25,
+          borderBottom: "1px solid",
+          borderColor: "divider"
+        }}>
         <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 2 }}>
           {stage === "scan" ? (
             <CircularProgress size={16} thickness={5} />
@@ -229,11 +246,13 @@ function WorkflowRail({
         <Box
           sx={{
             display: "grid",
-            gridTemplateColumns: "1fr 1fr",
-            gap: 1.5
+            gridTemplateColumns: compact
+              ? "repeat(4, minmax(0, 1fr))"
+              : "1fr 1fr",
+            gap: compact ? 0.75 : 1.5
           }}>
           <Box>
-            <Typography variant="h6">
+            <Typography variant={compact ? "subtitle1" : "h6"} fontWeight={800}>
               {totalGroupCount.toLocaleString()}
             </Typography>
             <Typography variant="caption" color="text.secondary">
@@ -241,13 +260,15 @@ function WorkflowRail({
             </Typography>
           </Box>
           <Box>
-            <Typography variant="h6">{totalItems.toLocaleString()}</Typography>
+            <Typography variant={compact ? "subtitle1" : "h6"} fontWeight={800}>
+              {totalItems.toLocaleString()}
+            </Typography>
             <Typography variant="caption" color="text.secondary">
               checked
             </Typography>
           </Box>
           <Box>
-            <Typography variant="h6">
+            <Typography variant={compact ? "subtitle1" : "h6"} fontWeight={800}>
               {exactGroupCount.toLocaleString()}
             </Typography>
             <Typography variant="caption" color="text.secondary">
@@ -255,7 +276,7 @@ function WorkflowRail({
             </Typography>
           </Box>
           <Box>
-            <Typography variant="h6">
+            <Typography variant={compact ? "subtitle1" : "h6"} fontWeight={800}>
               {similarGroupCount.toLocaleString()}
             </Typography>
             <Typography variant="caption" color="text.secondary">
@@ -263,35 +284,58 @@ function WorkflowRail({
             </Typography>
           </Box>
         </Box>
-        <Button
-          fullWidth
-          variant="contained"
-          startIcon={<PlayArrowRoundedIcon />}
-          onClick={onRescan}
-          sx={{ mt: 2, borderRadius: 999 }}>
-          Start over
-        </Button>
+        {!compact && (
+          <Button
+            fullWidth
+            variant="contained"
+            startIcon={<PlayArrowRoundedIcon />}
+            onClick={onRescan}
+            sx={{ mt: 2, borderRadius: 999 }}>
+            Start over
+          </Button>
+        )}
       </Box>
 
-      <Box sx={{ p: 1 }}>
+      <Box
+        sx={{
+          p: compact ? 0.75 : 1,
+          display: compact ? "grid" : "block",
+          gridTemplateColumns: compact
+            ? "repeat(4, minmax(0, 1fr))"
+            : undefined,
+          gap: compact ? 0.5 : undefined
+        }}>
         {steps.map((item, index) => (
           <Box
             key={item.label}
             sx={{
               display: "flex",
+              flexDirection: compact ? "column" : "row",
               alignItems: "center",
-              gap: 1.25,
-              px: 1.25,
-              py: 1.1,
+              justifyContent: compact ? "center" : undefined,
+              textAlign: compact ? "center" : "left",
+              gap: compact ? 0.35 : 1.25,
+              px: compact ? 0.5 : 1.25,
+              py: compact ? 0.75 : 1.1,
               borderRadius: 2,
               color: index === stageIndex ? "primary.main" : "text.secondary",
               bgcolor: index === stageIndex ? "primary.light" : "transparent"
             }}>
             {item.icon}
-            <Typography variant="body2" fontWeight={700} sx={{ flex: 1 }}>
+            <Typography
+              variant="body2"
+              fontWeight={700}
+              sx={{
+                flex: compact ? "initial" : 1,
+                fontSize: compact ? 11 : undefined,
+                lineHeight: compact ? 1.1 : undefined
+              }}>
               {item.label}
             </Typography>
-            <Typography variant="caption" color="text.secondary">
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ display: compact ? "none" : "block" }}>
               {item.value}
             </Typography>
           </Box>
@@ -305,8 +349,12 @@ function generateRequestId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
 
-function sendToServiceWorker(message: AppMessage): void {
-  chrome.runtime.sendMessage(message)
+function sendToServiceWorker<T = unknown>(
+  message: AppMessage
+): Promise<T | undefined> {
+  return Promise.resolve(
+    chrome.runtime.sendMessage({ ...message, clientId: APP_CLIENT_ID })
+  ) as Promise<T | undefined>
 }
 
 function activeDateRange(
@@ -331,18 +379,405 @@ function fullScanSettingsPatch(
     scanMode: scanSettings.scanMode,
     smartWindowSec: scanSettings.smartWindowSec,
     dateRange: scanSettings.dateRange,
-    albumScope: scanSettings.albumScope
+    albumScope: scanSettings.albumScope,
+    amazonBatchLimit: scanSettings.amazonBatchLimit,
+    icloudBatchLimit: scanSettings.icloudBatchLimit
   }
 }
 
 function providerLabel(provider: ScanSettings["sourceProvider"]): string {
-  return provider === "icloud" ? "iCloud Photos" : "Google Photos"
+  if (provider === "icloud") return "iCloud Photos"
+  if (provider === "amazon") return "Amazon Photos"
+  return "Google Photos"
 }
 
-function providerUrl(provider: ScanSettings["sourceProvider"]): string {
-  return provider === "icloud"
-    ? "https://www.icloud.com/photos"
-    : "https://photos.google.com/login"
+function providerFromTabUrl(url: string | undefined): PhotoProvider | null {
+  if (!url) return null
+  try {
+    const parsed = new URL(url)
+    if (parsed.hostname === "www.icloud.com") return "icloud"
+    if (parsed.hostname === "www.amazon.ca") return "amazon"
+    if (parsed.hostname === "photos.google.com") return "google"
+  } catch {
+    return null
+  }
+  return null
+}
+
+function providerBatchLimit(settings: ScanSettings): number | undefined {
+  const provider = settings.sourceProvider ?? "google"
+  const limit =
+    provider === "amazon"
+      ? settings.amazonBatchLimit
+      : provider === "icloud"
+        ? settings.icloudBatchLimit
+        : undefined
+  return typeof limit === "number" && Number.isFinite(limit) && limit > 0
+    ? Math.floor(limit)
+    : undefined
+}
+
+function SidePanelConnectionSetup({
+  selectedProvider,
+  onOpenProvider,
+  onRetry,
+  error,
+  connectionStatus = "Checking the open photo library tab..."
+}: {
+  selectedProvider: PhotoProvider
+  onOpenProvider: (provider: PhotoProvider) => void
+  onRetry: () => void
+  error?: string
+  connectionStatus?: string
+}) {
+  return (
+    <Box
+      sx={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "stretch",
+        maxWidth: "100%",
+        mx: "auto",
+        gap: 1.25
+      }}>
+      <Box
+        sx={{
+          border: "1px solid",
+          borderColor: "divider",
+          borderRadius: 2,
+          bgcolor: "#FFFFFF",
+          p: 1.25
+        }}>
+        <Typography variant="overline" color="text.secondary">
+          Step 1
+        </Typography>
+        <Typography variant="subtitle1" fontWeight={800} gutterBottom>
+          Choose photo source
+        </Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+          Pick one library. The main tab will open that provider.
+        </Typography>
+        <TextField
+          select
+          label="Photo source"
+          size="small"
+          fullWidth
+          value={selectedProvider}
+          sx={{ mb: 1 }}
+          onChange={(event) =>
+            onOpenProvider(event.target.value as PhotoProvider)
+          }>
+          <MenuItem value="google">Google Photos</MenuItem>
+          <MenuItem value="icloud">iCloud Photos</MenuItem>
+          <MenuItem value="amazon">Amazon Photos</MenuItem>
+        </TextField>
+        <Box
+          sx={{
+            border: "1px solid",
+            borderColor: "divider",
+            borderRadius: 2,
+            p: 0.5,
+            bgcolor: "#FAFBFD"
+          }}>
+          <Button
+            size="small"
+            variant="outlined"
+            startIcon={<RefreshRoundedIcon />}
+            onClick={onRetry}
+            fullWidth
+            sx={{ fontWeight: 800 }}>
+            Retry connection
+          </Button>
+        </Box>
+      </Box>
+      {error ? (
+        <Alert severity="warning">{error}</Alert>
+      ) : (
+        <Box
+          sx={{
+            display: "flex",
+            alignItems: "center",
+            gap: 1,
+            border: "1px solid",
+            borderColor: "info.light",
+            borderRadius: 2,
+            bgcolor: "#EEF8FF",
+            px: 1.25,
+            py: 1
+          }}>
+          <CircularProgress size={16} thickness={5} />
+          <Typography variant="body2" color="text.secondary">
+            {connectionStatus}
+          </Typography>
+        </Box>
+      )}
+    </Box>
+  )
+}
+
+type TimelineStepStatus = "complete" | "active" | "locked"
+
+function SidePanelTimelineStep({
+  index,
+  title,
+  description,
+  status,
+  icon,
+  summary,
+  children
+}: {
+  index: number
+  title: string
+  description: string
+  status: TimelineStepStatus
+  icon: ReactNode
+  summary?: string
+  children?: ReactNode
+}) {
+  const isActive = status === "active"
+  const isComplete = status === "complete"
+  const isCollapsed = !isActive
+  const markerColor = isComplete ? "#148A43" : isActive ? "#0B63F6" : "#9AA4B2"
+  const borderColor = isActive ? "#B8D4FF" : "#E3E8F0"
+
+  return (
+    <Box
+      sx={{
+        display: "grid",
+        gridTemplateColumns: isCollapsed
+          ? "28px minmax(0, 1fr)"
+          : "34px minmax(0, 1fr)",
+        gap: isCollapsed ? 0.75 : 1,
+        position: "relative",
+        "&:not(:last-of-type)::before": {
+          content: '""',
+          position: "absolute",
+          left: isCollapsed ? 13 : 16,
+          top: isCollapsed ? 31 : 38,
+          bottom: isCollapsed ? -12 : -14,
+          width: 2,
+          bgcolor: isComplete ? "#148A43" : "#D7DEE8"
+        }
+      }}>
+      <Box
+        sx={{
+          width: isCollapsed ? 28 : 34,
+          height: isCollapsed ? 28 : 34,
+          borderRadius: "50%",
+          display: "grid",
+          placeItems: "center",
+          bgcolor: isComplete ? "#EAF7EF" : isActive ? "#EAF2FF" : "#F4F6F9",
+          border: "2px solid",
+          borderColor: markerColor,
+          color: markerColor,
+          fontWeight: 800,
+          fontSize: isCollapsed ? 12 : 14,
+          zIndex: 1
+        }}>
+        {isComplete ? (
+          <CheckCircleRoundedIcon sx={{ fontSize: isCollapsed ? 16 : 18 }} />
+        ) : (
+          index
+        )}
+      </Box>
+      <Box
+        sx={{
+          border: "1px solid",
+          borderColor,
+          borderRadius: 2,
+          bgcolor: isActive ? "#FFFFFF" : isComplete ? "#FBFDFB" : "#F8FAFD",
+          boxShadow: isActive ? "0 14px 34px rgba(15, 23, 42, 0.08)" : "none",
+          opacity: status === "locked" ? 0.72 : 1,
+          overflow: "hidden"
+        }}>
+        <Box
+          sx={{
+            px: isCollapsed ? 0.85 : 1.15,
+            py: isCollapsed ? 0.7 : 1.15,
+            display: "grid",
+            gridTemplateColumns: isCollapsed
+              ? "minmax(0, 1fr) auto"
+              : "24px minmax(0, 1fr) auto",
+            gap: isCollapsed ? 0.75 : 0.9,
+            alignItems: "center"
+          }}>
+          {!isCollapsed && (
+            <Box
+              sx={{
+                color: isComplete
+                  ? "#148A43"
+                  : isActive
+                    ? "#0B63F6"
+                    : "#6B7280",
+                display: "grid",
+                placeItems: "center",
+                pt: 0.1
+              }}>
+              {icon}
+            </Box>
+          )}
+          <Box sx={{ minWidth: 0 }}>
+            <Typography
+              variant="subtitle2"
+              fontWeight={850}
+              noWrap={isCollapsed}
+              sx={{
+                lineHeight: isCollapsed ? 1.2 : 1.15,
+                letterSpacing: 0,
+                fontSize: isCollapsed ? 13 : undefined
+              }}>
+              {title}
+            </Typography>
+            {!isCollapsed && (
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ display: "block", mt: 0.2, lineHeight: 1.35 }}>
+                {isComplete && summary ? summary : description}
+              </Typography>
+            )}
+          </Box>
+          <Typography
+            variant="caption"
+            noWrap
+            sx={{
+              color: isComplete ? "#148A43" : "#6B7280",
+              fontWeight: 850,
+              lineHeight: 1,
+              maxWidth: 130,
+              overflow: "hidden",
+              textOverflow: "ellipsis"
+            }}>
+            {isComplete ? summary || "Done" : isCollapsed ? "Locked" : ""}
+          </Typography>
+        </Box>
+        {isActive && children && (
+          <Box
+            sx={{
+              px: 1.15,
+              pb: 1.15,
+              display: "grid",
+              gap: 1
+            }}>
+            {children}
+          </Box>
+        )}
+      </Box>
+    </Box>
+  )
+}
+
+function SidePanelSourceBar({
+  provider,
+  connected,
+  onProviderChange
+}: {
+  provider: PhotoProvider
+  connected: boolean
+  onProviderChange: (provider: PhotoProvider) => void
+}) {
+  return (
+    <Box
+      sx={{
+        position: "sticky",
+        top: 0,
+        zIndex: 3,
+        display: "grid",
+        gridTemplateColumns: "minmax(0, 1fr)",
+        gap: 0.75,
+        border: "1px solid",
+        borderColor: "#D8E1EE",
+        borderRadius: 2,
+        bgcolor: "#FFFFFF",
+        boxShadow: "0 10px 26px rgba(15, 23, 42, 0.08)",
+        p: 1
+      }}>
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 1
+        }}>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          fontWeight={850}
+          sx={{ textTransform: "uppercase", letterSpacing: 0 }}>
+          Photo source
+        </Typography>
+        <Typography
+          variant="caption"
+          noWrap
+          sx={{
+            color: connected ? "#148A43" : "#6B7280",
+            fontWeight: 850,
+            maxWidth: 130,
+            overflow: "hidden",
+            textOverflow: "ellipsis"
+          }}>
+          {connected ? "Connected" : "Not connected"}
+        </Typography>
+      </Box>
+      <TextField
+        select
+        size="small"
+        fullWidth
+        value={provider}
+        aria-label="Photo source"
+        onChange={(event) =>
+          onProviderChange(event.target.value as PhotoProvider)
+        }>
+        <MenuItem value="google">Google Photos</MenuItem>
+        <MenuItem value="icloud">iCloud Photos</MenuItem>
+        <MenuItem value="amazon">Amazon Photos</MenuItem>
+      </TextField>
+    </Box>
+  )
+}
+
+function SidePanelSafetyFooter() {
+  return (
+    <Box
+      sx={{
+        mt: 1.25,
+        px: 1.2,
+        py: 1.1,
+        border: "1px solid",
+        borderColor: "#DCE8DD",
+        borderRadius: 2,
+        bgcolor: "#F8FCF9",
+        display: "grid",
+        gridTemplateColumns: "28px minmax(0, 1fr)",
+        gap: 1,
+        alignItems: "center"
+      }}>
+      <Box
+        sx={{
+          width: 28,
+          height: 28,
+          borderRadius: 1.5,
+          bgcolor: "#E6F6EC",
+          color: "#148A43",
+          display: "grid",
+          placeItems: "center"
+        }}>
+        <LockOutlinedIcon sx={{ fontSize: 17 }} />
+      </Box>
+      <Box>
+        <Typography variant="body2" fontWeight={850} sx={{ lineHeight: 1.2 }}>
+          Your photos stay safe
+        </Typography>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ display: "block", lineHeight: 1.35, mt: 0.2 }}>
+          The extension reads metadata for matching. Nothing moves to trash
+          until you review and confirm.
+        </Typography>
+      </Box>
+    </Box>
+  )
 }
 
 function dateToUtcMs(value: string, endOfDay = false): number {
@@ -512,7 +947,13 @@ type UndoData = {
 // ============================================================
 
 export default function App() {
+  const isSidePanel =
+    typeof window !== "undefined" &&
+    (window.location.pathname.includes("sidepanel") ||
+      window.location.pathname.includes("scanner-panel"))
   const [state, dispatch] = useReducer(appReducer, { status: "connecting" })
+  const [sidePanelSourceConfirmed, setSidePanelSourceConfirmed] =
+    useState(false)
   const [storageChecked, setStorageChecked] = useState(false)
   const [settings, setSettings] = useReducer(
     (prev: ScanSettings, next: Partial<ScanSettings>) => ({ ...prev, ...next }),
@@ -583,6 +1024,8 @@ export default function App() {
   const albumsRequestedForAccountRef = useRef<string | null>(null)
   const currentAccountEmailRef = useRef<string | undefined>(undefined)
   const currentHasGptkRef = useRef(false)
+  const sidePanelHostProviderRef = useRef<PhotoProvider | null>(null)
+  const sidePanelHostTabIdRef = useRef<number | null>(null)
 
   // Holds selections loaded from storage; applied once when groups first load
   const pendingSelectionsRef = useRef<PendingSelections | null>(null)
@@ -658,6 +1101,87 @@ export default function App() {
       : state.status === "scanning"
         ? state.partialMediaItems ?? {}
         : {}
+
+  useEffect(() => {
+    if (!isSidePanel || !chrome.runtime.connect) return
+
+    const port = chrome.runtime.connect({ name: "gpd-side-panel" })
+    let disposed = false
+    const postReady = async () => {
+      let activeTabId: number | undefined
+      try {
+        const [activeTab] = await chrome.tabs.query({
+          active: true,
+          currentWindow: true
+        })
+        if (
+          activeTab?.id !== undefined &&
+          !activeTab.url?.startsWith("chrome-extension://")
+        ) {
+          activeTabId = activeTab.id
+          sidePanelHostTabIdRef.current = activeTab.id
+        }
+        const hostProvider = providerFromTabUrl(activeTab?.url)
+        if (hostProvider) {
+          sidePanelHostProviderRef.current = hostProvider
+          setSidePanelSourceConfirmed(true)
+          if ((settingsRef.current.sourceProvider ?? "google") !== hostProvider) {
+            scanAbortRef.current?.abort()
+            scanAbortRef.current = null
+            currentScanRequestIdRef.current = null
+            scanCheckpointRef.current = null
+            cachedMediaItemsRef.current = null
+            pendingSelectionsRef.current = null
+            setResumeCheckpoint(null)
+            setSelectedGroupIds(new Set())
+            setKeptOverrides({})
+            void chrome.storage.local.remove([
+              "scanResults",
+              "selections",
+              SCAN_CHECKPOINT_KEY
+            ])
+            dispatch({ type: "RESET" })
+            healthCheckAttemptsRef.current = 0
+            const nextSettings = {
+              ...settingsRef.current,
+              sourceProvider: hostProvider,
+              albumScope:
+                hostProvider === "google"
+                  ? settingsRef.current.albumScope
+                  : undefined
+            }
+            settingsRef.current = nextSettings
+            setSettings({
+              sourceProvider: hostProvider,
+              albumScope: nextSettings.albumScope
+            })
+            void chrome.storage.local.set({ settings: nextSettings })
+            sendToServiceWorker({
+              app: APP_ID,
+              action: "healthCheck",
+              provider: hostProvider
+            })
+          }
+        }
+      } catch {
+        // Best effort: older browsers can still use the action-click tab id.
+      }
+      if (disposed) return
+      port.postMessage({
+        app: APP_ID,
+        action: "sidePanel.ready",
+        clientId: APP_CLIENT_ID,
+        activeTabId
+      })
+    }
+    void postReady()
+
+    return () => {
+      disposed = true
+      port.disconnect()
+    }
+  }, [isSidePanel])
+
   useEffect(() => {
     if (pendingSelectionsRef.current) {
       const saved = pendingSelectionsRef.current
@@ -749,6 +1273,7 @@ export default function App() {
       sender: chrome.runtime.MessageSender
     ) => {
       if (message?.app !== APP_ID) return
+      if (message.clientId && message.clientId !== APP_CLIENT_ID) return
       // The bridge content script sends GPTK results via chrome.runtime.sendMessage,
       // which broadcasts to ALL extension contexts — so this listener fires twice:
       // once directly from the bridge (sender.tab set) and once via the service
@@ -759,19 +1284,21 @@ export default function App() {
       switch (message.action) {
         case "healthCheck.result": {
           const msg = message as HealthCheckResultMessage
-          // Swallow early "failed" results and retry — when the app tab opens
-          // before the bridge content script has fully loaded on a fresh
-          // photos.google.com tab, or when the service worker has just woken
-          // up from MV3 idle, the first probe often misses. Without this the
-          // user sees a spurious "disconnected" flash and has to manually hit
-          // Retry. We give up after a few attempts and let the reducer show
-          // the error.
           if (
             !msg.success &&
             healthCheckAttemptsRef.current < HEALTH_CHECK_MAX_ATTEMPTS - 1
           ) {
             healthCheckAttemptsRef.current++
             const delay = 400 * Math.pow(2, healthCheckAttemptsRef.current - 1)
+            dispatch({
+              type: "HEALTH_CHECK_RESULT",
+              payload: {
+                ...msg,
+                error:
+                  msg.error ??
+                  `Still trying to connect to ${providerLabel(settingsRef.current.sourceProvider ?? "google")}. If this does not recover, reload the photo tab and click Retry.`
+              }
+            })
             window.setTimeout(() => {
               sendToServiceWorker({
                 app: APP_ID,
@@ -891,16 +1418,23 @@ export default function App() {
                 )
                 cachedMediaItemsRef.current = null
               }
-              items = filterMediaItemsByDateRange(
-                items,
-                settingsRef.current.dateRange
-              )
+              if (activeDateRange(settingsRef.current.dateRange)) {
+                items = filterMediaItemsByDateRange(
+                  items,
+                  settingsRef.current.dateRange
+                )
+              }
               if (
                 items.length === 0 &&
-                (settingsRef.current.sourceProvider ?? "google") === "icloud"
+                (settingsRef.current.sourceProvider ?? "google") !== "google"
               ) {
+                const sourceProvider =
+                  settingsRef.current.sourceProvider ?? "google"
+                const providerName = providerLabel(sourceProvider)
                 const error =
-                  "No loaded iCloud photos were found. Open iCloud Photos, wait for thumbnails to appear, scroll the library to load photos, then scan again."
+                  sourceProvider === "amazon"
+                    ? `No ${providerName} items were found. Open amazon.ca/photos?sf=1, sign in, leave the Amazon Photos tab open, then scan again.`
+                    : `No loaded ${providerName} items were found. Open ${providerName}, wait for thumbnails to appear, scroll the library to load photos, then scan again.`
                 patchScanCheckpoint({
                   status: "error",
                   error,
@@ -948,6 +1482,9 @@ export default function App() {
                   trashedKeys?: string[]
                   trashedDedupKeys?: string[]
                   trashedCount?: number
+                  requestedCount?: number
+                  dryRun?: boolean
+                  message?: string
                   partial?: boolean
                   retryAttempts?: number
                 }
@@ -969,6 +1506,23 @@ export default function App() {
                   retryAttempts: data?.retryAttempts
                 })
               )
+              if (data?.dryRun) {
+                dispatch({ type: "TRASH_COMPLETE", trashedKeys: [] })
+                setTrashWarning(
+                  data.message ||
+                    `iCloud delete dry-run completed for ${(
+                      data.requestedCount ?? attemptedMediaKeys.length
+                    ).toLocaleString()} item${
+                      (data.requestedCount ?? attemptedMediaKeys.length) === 1
+                        ? ""
+                        : "s"
+                    }. Nothing was deleted.`
+                )
+                preTrashSnapshotRef.current = null
+                pendingDedupKeysRef.current = null
+                pendingMediaKeysToTrashRef.current = null
+                break
+              }
               dispatch({ type: "TRASH_COMPLETE", trashedKeys })
               // Set undo data from the snapshot captured before trash
               if (preTrashSnapshotRef.current && pendingDedupKeysRef.current) {
@@ -1089,6 +1643,17 @@ export default function App() {
   settingsRef.current = settings
   const stateRef = useRef(state)
   stateRef.current = state
+
+  useEffect(() => {
+    if (
+      state.status === "connected" ||
+      state.status === "scanning" ||
+      state.status === "results" ||
+      state.status === "trashing"
+    ) {
+      setSidePanelSourceConfirmed(true)
+    }
+  }, [state.status])
 
   // Run MediaPipe duplicate detection on fetched media items
   const runDuplicateDetection = useCallback(
@@ -1262,10 +1827,23 @@ export default function App() {
           scanCheckpointRef.current = checkpoint
           setResumeCheckpoint(checkpoint)
         }
-        const storedSettings = result.settings
+        const restoredSettings = result.settings
           ? normalizeStoredSettings(result.settings)
           : settingsRef.current
-        if (result.settings) {
+        const hostProvider = isSidePanel
+          ? sidePanelHostProviderRef.current
+          : null
+        const storedSettings = hostProvider
+          ? {
+              ...restoredSettings,
+              sourceProvider: hostProvider,
+              albumScope:
+                hostProvider === "google"
+                  ? restoredSettings.albumScope
+                  : undefined
+            }
+          : restoredSettings
+        if (result.settings || hostProvider) {
           settingsRef.current = storedSettings
           setSettings(storedSettings)
         }
@@ -1518,7 +2096,8 @@ export default function App() {
     if (!mediaItems) return
     if (groups.length > 0) {
       const storedMediaItemCount = Object.keys(mediaItems).length
-      const mediaItemsAreComplete = storedMediaItemCount === totalItems
+      const mediaItemsAreComplete =
+        !providerBatchLimit(settings) && storedMediaItemCount === totalItems
       const newestCreationTimestamp = mediaItemsAreComplete
         ? Object.values(mediaItems).reduce(
             (max, item) => Math.max(max, item.creationTimestamp ?? 0),
@@ -1655,8 +2234,9 @@ export default function App() {
       // incremental cache so a year/month result cannot poison a later full scan.
       cachedMediaItemsRef.current = null
       let sinceTimestamp: number | undefined
-      const dateRange = activeDateRange(scanSettings.dateRange)
       const sourceProvider = scanSettings.sourceProvider ?? "google"
+      const dateRange = activeDateRange(scanSettings.dateRange)
+      const batchLimit = providerBatchLimit(scanSettings)
       const albumScope =
         sourceProvider === "google"
           ? activeAlbumScope(scanSettings.albumScope)
@@ -1669,6 +2249,7 @@ export default function App() {
         if (
           !dateRange &&
           !albumScope &&
+          !batchLimit &&
           (prev?.sourceProvider ?? "google") === sourceProvider &&
           !prev?.dateRange &&
           !prev?.albumScope &&
@@ -1703,7 +2284,8 @@ export default function App() {
         args: {
           dateRange,
           albumScope,
-          sinceTimestamp
+          sinceTimestamp,
+          limit: batchLimit
         }
       })
     },
@@ -1861,12 +2443,16 @@ export default function App() {
 
   const handleTrash = useCallback(() => {
     if (state.status !== "results") return
-    const hasIcloudItems = Object.values(state.mediaItems).some(
-      (item) => item.provider === "icloud"
+    const unsupportedProvider = Object.values(state.mediaItems).find(
+      (item) =>
+        item.provider &&
+        item.provider !== "google" &&
+        item.provider !== "icloud" &&
+        item.provider !== "amazon"
     )
-    if (hasIcloudItems) {
+    if (unsupportedProvider) {
       setTrashWarning(
-        "Trash is not available for iCloud Photos yet. Review and export the duplicate report instead."
+        `Trash is not available for ${providerLabel(unsupportedProvider.provider)} yet. Review and export the duplicate report instead.`
       )
       return
     }
@@ -1900,6 +2486,12 @@ export default function App() {
     if (!trashConfirm || state.status !== "results") return
     const { dedupKeys, mediaKeysToTrash } = trashConfirm
     setReportError(null)
+    const trashProvider =
+      mediaKeysToTrash
+        .map((key) => state.mediaItems[key]?.provider)
+        .find((provider): provider is NonNullable<typeof provider> =>
+          Boolean(provider)
+        ) ?? "google"
 
     const deleteReport = buildDeleteReport({
       groups: visibleGroups,
@@ -1945,9 +2537,11 @@ export default function App() {
       action: "gptkCommand",
       command: "trashItems",
       requestId,
+      provider: trashProvider,
       args: {
         dedupKeys,
         mediaKeysToTrash,
+        dryRun: trashProvider === "icloud",
         batchSize: TRASH_BATCH_SIZE,
         batchPauseMs: TRASH_BATCH_PAUSE_MS,
         retryCount: TRASH_RETRY_COUNT,
@@ -2012,6 +2606,102 @@ export default function App() {
       provider: settingsRef.current.sourceProvider ?? "google"
     })
   }, [])
+
+  const openProviderFromSidePanel = useCallback(
+    async (provider: PhotoProvider): Promise<LaunchProviderResult> => {
+      let hostTabId = sidePanelHostTabIdRef.current
+      try {
+        if (hostTabId === null && isSidePanel && chrome.tabs?.query) {
+          const [activeTab] = await chrome.tabs.query({
+            active: true,
+            currentWindow: true
+          })
+          if (
+            activeTab?.id !== undefined &&
+            !activeTab.url?.startsWith("chrome-extension://")
+          ) {
+            hostTabId = activeTab.id
+            sidePanelHostTabIdRef.current = activeTab.id
+          }
+        }
+
+        const result = await sendToServiceWorker<LaunchProviderResult>({
+          app: APP_ID,
+          action: "launchProvider",
+          provider,
+          hostTabId: hostTabId ?? undefined
+        })
+        if (result?.success && typeof result.tabId === "number") {
+          sidePanelHostTabIdRef.current = result.tabId
+        }
+        return (
+          result ?? {
+            success: false,
+            provider,
+            error: `Chrome did not respond while opening ${providerLabel(provider)}. Try clicking the extension on the photo tab again.`
+          }
+        )
+      } catch (error) {
+        return {
+          success: false,
+          provider,
+          error:
+            error instanceof Error
+              ? error.message
+              : `Unable to open ${providerLabel(provider)}.`
+        }
+      }
+    },
+    [isSidePanel]
+  )
+
+  const handleOpenProvider = useCallback((provider: PhotoProvider) => {
+    setSidePanelSourceConfirmed(true)
+    scanAbortRef.current?.abort()
+    scanAbortRef.current = null
+    currentScanRequestIdRef.current = null
+    scanCheckpointRef.current = null
+    cachedMediaItemsRef.current = null
+    pendingSelectionsRef.current = null
+    setResumeCheckpoint(null)
+    setSelectedGroupIds(new Set())
+    setKeptOverrides({})
+    setSettings({
+      sourceProvider: provider,
+      albumScope:
+        provider === "google" ? settingsRef.current.albumScope : undefined
+    })
+    void chrome.storage.local.remove([
+      "scanResults",
+      "selections",
+      SCAN_CHECKPOINT_KEY
+    ])
+    dispatch({ type: "RESET" })
+    healthCheckAttemptsRef.current = 0
+    void openProviderFromSidePanel(provider).then((result) => {
+      if (!result.success) {
+        dispatch({
+          type: "HEALTH_CHECK_RESULT",
+          payload: {
+            app: APP_ID,
+            action: "healthCheck.result",
+            success: false,
+            hasGptk: false,
+            provider,
+            error: result.error
+          }
+        })
+        return
+      }
+      window.setTimeout(() => {
+        sendToServiceWorker({
+          app: APP_ID,
+          action: "healthCheck",
+          provider
+        })
+      }, result.alreadyOpen ? 250 : 900)
+    })
+  }, [openProviderFromSidePanel])
 
   const handleUndo = useCallback(() => {
     if (!undoData) return
@@ -2103,253 +2793,544 @@ export default function App() {
         ? `${state.itemsProcessed.toLocaleString()} of ${state.totalEstimate.toLocaleString()}`
         : `${state.itemsProcessed.toLocaleString()} checked`
       : undefined
+  const showWorkflowRail =
+    !isSidePanel ||
+    state.status === "scanning" ||
+    state.status === "results" ||
+    state.status === "trashing"
+  const sourceProvider = settings.sourceProvider ?? "google"
+  const sidePanelHasConnection =
+    state.status === "connected" ||
+    state.status === "scanning" ||
+    state.status === "results" ||
+    state.status === "trashing"
+  const sourceStepComplete = sidePanelSourceConfirmed || sidePanelHasConnection
+  const scopeStepComplete =
+    state.status === "scanning" ||
+    state.status === "results" ||
+    state.status === "trashing"
+  const scanStepComplete =
+    state.status === "results" || state.status === "trashing"
+  const sidePanelScopeSummary = settings.albumScope?.title
+    ? settings.albumScope.title
+    : settings.albumScope?.mediaKey
+      ? "Selected album"
+      : providerBatchLimit(settings)
+        ? `${providerBatchLimit(settings)?.toLocaleString()} item test batch`
+        : "Entire library"
+  const sidePanelDuplicateSummary =
+    groups.length > 0
+      ? `${groups.length.toLocaleString()} duplicate set${
+          groups.length === 1 ? "" : "s"
+        }`
+      : state.status === "results"
+        ? "No duplicate sets"
+        : "Review unlocks after scan"
 
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
+      {isSidePanel && (
+        <GlobalStyles
+          styles={{
+            body: {
+              background: "#F7F9FC",
+              overflowX: "hidden"
+            },
+            "#__plasmo": {
+              minWidth: 0
+            }
+          }}
+        />
+      )}
 
-      <AppBar position="sticky" elevation={0}>
-        <Toolbar sx={{ minHeight: 56, gap: 1.25 }}>
-          <PhotoLibraryRoundedIcon color="primary" />
-          <Typography variant="h6" fontWeight={700} sx={{ flexGrow: 1 }}>
-            Google Photos Deduper
-          </Typography>
-          {"accountEmail" in state && state.accountEmail && (
+      {!isSidePanel && (
+        <AppBar position="sticky" elevation={0}>
+          <Toolbar sx={{ gap: 1 }}>
+            <PhotoLibraryRoundedIcon color="primary" />
             <Typography
-              variant="body2"
-              color="text.secondary"
+              variant="h6"
+              fontWeight={800}
               noWrap
-              sx={{ maxWidth: { xs: 150, sm: "none" } }}>
-              Signed in as {state.accountEmail}
+              sx={{
+                flexGrow: 1,
+                letterSpacing: 0
+              }}>
+              Photo Duplicate Finder
             </Typography>
-          )}
-        </Toolbar>
-      </AppBar>
+            {"accountEmail" in state && state.accountEmail && (
+              <Typography variant="body2" color="text.secondary" noWrap>
+                Signed in as {state.accountEmail}
+              </Typography>
+            )}
+          </Toolbar>
+        </AppBar>
+      )}
 
       {/* Main content */}
       <Box
         component="main"
         sx={{
-          maxWidth:
-            state.status === "results" && groups.length > 0 ? 1500 : 1200,
+          maxWidth: isSidePanel
+            ? "100%"
+            : state.status === "results" && groups.length > 0
+              ? 1500
+              : 1200,
           mx: "auto",
-          px: { xs: 2, md: 3 },
-          py: { xs: 2, md: 3 },
-          minHeight: "calc(100vh - 64px)"
+          px: isSidePanel ? 1 : { xs: 2, md: 3 },
+          py: isSidePanel ? 1 : { xs: 2, md: 3 },
+          minHeight: isSidePanel ? "100vh" : "calc(100vh - 64px)"
         }}>
-        <Box
-          sx={{
-            display: "flex",
-            flexDirection: { xs: "column", md: "row" },
-            gap: 2.5,
-            alignItems: "flex-start"
-          }}>
-          <WorkflowRail
-            stage={workflowStage}
-            totalItems={workflowTotalItems}
-            totalGroupCount={workflowGroups.length}
-            exactGroupCount={workflowExactGroupCount}
-            similarGroupCount={workflowSimilarGroupCount}
-            duplicateCount={workflowDuplicateCount}
-            scanDetail={workflowScanDetail}
-            onRescan={handleReset}
-          />
+        {isSidePanel ? (
+          <Box
+            sx={{
+              display: "grid",
+              gap: 1.15,
+              pb: 1.5
+            }}>
+            <SidePanelSourceBar
+              provider={sourceProvider}
+              connected={sidePanelHasConnection}
+              onProviderChange={handleOpenProvider}
+            />
 
-          <Box sx={{ minWidth: 0, flex: 1, width: "100%" }}>
-            {state.status === "connecting" && (
-              <Box sx={{ display: "flex", justifyContent: "center", pt: 10 }}>
-                <CircularProgress disableShrink />
-              </Box>
-            )}
+            <SidePanelTimelineStep
+              index={1}
+              title="Source"
+              description="Confirm the selected library and open it in this window."
+              status={sourceStepComplete ? "complete" : "active"}
+              icon={<PhotoLibraryRoundedIcon sx={{ fontSize: 19 }} />}
+              summary={providerLabel(sourceProvider)}>
+              <Button
+                variant="contained"
+                fullWidth
+                endIcon={<OpenInNewRoundedIcon />}
+                onClick={() => handleOpenProvider(sourceProvider)}
+                sx={{ minHeight: 42, borderRadius: 2, fontWeight: 850 }}>
+                Continue
+              </Button>
+            </SidePanelTimelineStep>
 
-            {state.status === "disconnected" && (
-              <Box
-                sx={{
-                  display: "flex",
-                  flexDirection: "column",
-                  alignItems: "center",
-                  pt: 8,
-                  gap: 2
-                }}>
-                <Alert severity="error" sx={{ maxWidth: 480, width: "100%" }}>
+            <SidePanelTimelineStep
+              index={2}
+              title="Sign in"
+              description="Open the provider tab, sign in, then verify the connection."
+              status={
+                sidePanelHasConnection
+                  ? "complete"
+                  : sourceStepComplete
+                    ? "active"
+                    : "locked"
+              }
+              icon={<LockOutlinedIcon sx={{ fontSize: 19 }} />}
+              summary={`Connected to ${providerLabel(sourceProvider)}`}>
+              {state.status === "disconnected" && (
+                <Alert severity="warning" sx={{ py: 0.6 }}>
                   {state.error}
                 </Alert>
-                <Box sx={{ display: "flex", gap: 1 }}>
-                  <Button
-                    variant="contained"
-                    href={providerUrl(settings.sourceProvider)}
-                    target="_blank"
-                    rel="noopener noreferrer">
-                    Open {providerLabel(settings.sourceProvider)}
-                  </Button>
-                  {(settings.sourceProvider ?? "google") !== "icloud" && (
-                    <Button
-                      variant="outlined"
-                      onClick={() =>
-                        setSettings({
-                          sourceProvider: "icloud",
-                          albumScope: undefined
-                        })
-                      }>
-                      Use iCloud Photos
-                    </Button>
-                  )}
-                  {(settings.sourceProvider ?? "google") !== "google" && (
-                    <Button
-                      variant="outlined"
-                      onClick={() =>
-                        setSettings({
-                          sourceProvider: "google"
-                        })
-                      }>
-                      Use Google Photos
-                    </Button>
-                  )}
-                  <Button variant="outlined" onClick={handleReset}>
-                    Retry Connection
-                  </Button>
-                </Box>
-                <Typography variant="caption" color="text.secondary">
-                  Return here once {providerLabel(settings.sourceProvider)} is
-                  open and you're signed in.
-                </Typography>
-              </Box>
-            )}
-
-            {state.status === "connected" && (
-              <ScanConfig
-                settings={settings}
-                onSettingsChange={setSettings}
-                onStartScan={handleStartScan}
-                onResumeScan={handleResumeScan}
-                onDismissResume={handleDismissResume}
-                onClearCache={handleClearCache}
-                onRebuildCache={handleRebuildCache}
-                onExportCacheDiagnostics={handleExportCacheDiagnostics}
-                hasGptk={state.hasGptk}
-                cacheEntryCount={cacheEntryCount}
-                cacheStatus={cacheStatus}
-                cacheBusy={cacheBusy}
-                resumeCheckpoint={resumeCheckpoint}
-                albums={albums}
-                albumsLoading={albumsLoading}
-                albumsError={albumsError}
-                onRefreshAlbums={() => requestAlbums(state.accountEmail)}
-              />
-            )}
-
-            {state.status === "scanning" && (
-              <>
-                <ScanProgress
-                  phase={state.phase}
-                  itemsProcessed={state.itemsProcessed}
-                  totalEstimate={state.totalEstimate}
-                  message={state.message}
-                  onPause={handlePauseScan}
-                />
-                {provisionalGroups.length > 0 && (
-                  <Box sx={{ mt: 3 }}>
-                    <Alert severity="info" sx={{ mb: 2 }}>
-                      Showing possible duplicate sets while the scan continues.
-                      Trash actions unlock after the scan completes.
-                    </Alert>
-                    <DuplicateGroups
-                      groups={provisionalGroups}
-                      mediaItems={displayMediaItems}
-                      selectedGroupIds={new Set()}
-                      onToggleGroup={() => {}}
-                      keptByGroupId={keptByGroupId}
-                      onToggleKept={() => {}}
-                      onTrashAll={() => {}}
-                      readOnly
-                      heading={`${provisionalGroups.length} Possible Duplicate Set${provisionalGroups.length !== 1 ? "s" : ""}`}
-                    />
-                  </Box>
-                )}
-              </>
-            )}
-
-            {state.status === "results" &&
-              groups.length === 0 &&
-              storageChecked && (
+              )}
+              {state.status === "connecting" && (
                 <Box
                   sx={{
                     display: "flex",
-                    flexDirection: "column",
                     alignItems: "center",
-                    pt: 8,
-                    gap: 2
+                    gap: 1,
+                    color: "text.secondary"
                   }}>
-                  <Typography variant="h6" color="text.secondary">
-                    No duplicates found in your library.
+                  <CircularProgress size={16} thickness={5} />
+                  <Typography variant="body2">
+                    Checking the open {providerLabel(sourceProvider)} tab...
                   </Typography>
-                  <Typography variant="body2" color="text.secondary">
-                    For reuploads or copies taken years apart, use Full scan and
-                    move match sensitivity toward More matches.
-                  </Typography>
-                  <Button variant="contained" onClick={handleReset}>
-                    Change scan settings
-                  </Button>
                 </Box>
               )}
+              <Box
+                sx={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr",
+                  gap: 1
+                }}>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  startIcon={<OpenInNewRoundedIcon />}
+                  onClick={() => handleOpenProvider(sourceProvider)}
+                  sx={{ fontWeight: 800 }}>
+                  Open
+                </Button>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  startIcon={<RefreshRoundedIcon />}
+                  onClick={handleReset}
+                  sx={{ fontWeight: 800 }}>
+                  Retry
+                </Button>
+              </Box>
+              <Typography variant="caption" color="text.secondary">
+                This step must pass before scan controls unlock.
+              </Typography>
+            </SidePanelTimelineStep>
 
-            {state.status === "results" && groups.length > 0 && (
-              <>
-                <ActionBar
-                  totalItems={state.totalItems}
-                  groupCount={visibleGroups.length}
-                  totalGroupCount={groups.length}
-                  exactGroupCount={exactGroupCount}
-                  similarGroupCount={similarGroupCount}
-                  duplicateCount={duplicateCount}
-                  reviewFilter={reviewFilter}
-                  onReviewFilterChange={setReviewFilter}
-                  onSelectAll={handleSelectAll}
-                  onDeselectAll={handleDeselectAll}
-                  onTrash={handleTrash}
-                  onRescan={handleReset}
-                  onExportJson={handleExportJson}
-                  onExportCsv={handleExportCsv}
-                  onApplyKeepStrategy={handleApplyKeepStrategy}
+            <SidePanelTimelineStep
+              index={3}
+              title="Scope"
+              description="Choose exactly what the scan should inspect."
+              status={
+                scopeStepComplete
+                  ? "complete"
+                  : state.status === "connected"
+                    ? "active"
+                    : "locked"
+              }
+              icon={<CollectionsRoundedIcon sx={{ fontSize: 19 }} />}
+              summary={sidePanelScopeSummary}>
+              {state.status === "connected" && (
+                <ScanConfig
+                  settings={settings}
+                  onSettingsChange={setSettings}
+                  onStartScan={handleStartScan}
+                  onResumeScan={handleResumeScan}
+                  onDismissResume={handleDismissResume}
+                  onClearCache={handleClearCache}
+                  onRebuildCache={handleRebuildCache}
+                  onExportCacheDiagnostics={handleExportCacheDiagnostics}
+                  hasGptk={state.hasGptk}
+                  cacheEntryCount={cacheEntryCount}
+                  cacheStatus={cacheStatus}
+                  cacheBusy={cacheBusy}
+                  resumeCheckpoint={resumeCheckpoint}
+                  albums={albums}
+                  albumsLoading={albumsLoading}
+                  albumsError={albumsError}
+                  onRefreshAlbums={() => requestAlbums(state.accountEmail)}
+                  compact
                 />
-                <DuplicateGroups
-                  groups={visibleGroups}
-                  mediaItems={displayMediaItems}
-                  selectedGroupIds={selectedGroupIds}
-                  onToggleGroup={handleToggleGroup}
-                  keptByGroupId={keptByGroupId}
-                  onToggleKept={handleToggleKept}
-                  onTrashAll={handleTrashAllCopies}
-                />
-              </>
-            )}
+              )}
+            </SidePanelTimelineStep>
 
-            {state.status === "trashing" && (
-              <Box sx={{ maxWidth: 480, mx: "auto", p: 4 }}>
-                <Typography variant="h5" fontWeight={600} gutterBottom>
-                  Moving to Trash
-                </Typography>
-                <Box
-                  sx={{ display: "flex", alignItems: "center", gap: 1, mb: 2 }}>
-                  <CircularProgress size={14} thickness={5} />
-                  <Typography variant="body2" color="text.secondary">
+            <SidePanelTimelineStep
+              index={4}
+              title="Scan"
+              description="Find possible duplicate photos and videos."
+              status={
+                scanStepComplete
+                  ? "complete"
+                  : state.status === "scanning"
+                    ? "active"
+                    : "locked"
+              }
+              icon={<SearchRoundedIcon sx={{ fontSize: 19 }} />}
+              summary={
+                state.status === "results"
+                  ? `${state.totalItems.toLocaleString()} items checked`
+                  : workflowScanDetail
+              }>
+              {state.status === "scanning" && (
+                <>
+                  <ScanProgress
+                    phase={state.phase}
+                    itemsProcessed={state.itemsProcessed}
+                    totalEstimate={state.totalEstimate}
+                    message={state.message}
+                    onPause={handlePauseScan}
+                  />
+                  {provisionalGroups.length > 0 && (
+                    <Alert severity="info" sx={{ py: 0.65 }}>
+                      Showing possible sets while the scan continues. Cleanup
+                      unlocks after the scan completes.
+                    </Alert>
+                  )}
+                </>
+              )}
+            </SidePanelTimelineStep>
+
+            <SidePanelTimelineStep
+              index={5}
+              title="Review"
+              description="Choose what stays before anything moves to trash."
+              status={
+                state.status === "results" || state.status === "trashing"
+                  ? "active"
+                  : "locked"
+              }
+              icon={<DoneAllRoundedIcon sx={{ fontSize: 19 }} />}
+              summary={sidePanelDuplicateSummary}>
+              {state.status === "results" &&
+                groups.length === 0 &&
+                storageChecked && (
+                  <Box sx={{ display: "grid", gap: 1 }}>
+                    <Typography variant="body2" fontWeight={800}>
+                      No duplicates found
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      Try Full scan or a wider time window if you expect
+                      reuploads saved far apart.
+                    </Typography>
+                    <Button variant="outlined" onClick={handleReset}>
+                      Change scan settings
+                    </Button>
+                  </Box>
+                )}
+              {state.status === "results" && groups.length > 0 && (
+                <>
+                  <ActionBar
+                    totalItems={state.totalItems}
+                    groupCount={visibleGroups.length}
+                    totalGroupCount={groups.length}
+                    exactGroupCount={exactGroupCount}
+                    similarGroupCount={similarGroupCount}
+                    duplicateCount={duplicateCount}
+                    reviewFilter={reviewFilter}
+                    onReviewFilterChange={setReviewFilter}
+                    onSelectAll={handleSelectAll}
+                    onDeselectAll={handleDeselectAll}
+                    onTrash={handleTrash}
+                    onRescan={handleReset}
+                    onExportJson={handleExportJson}
+                    onExportCsv={handleExportCsv}
+                    onApplyKeepStrategy={handleApplyKeepStrategy}
+                    compact
+                  />
+                  <DuplicateGroups
+                    groups={visibleGroups}
+                    mediaItems={displayMediaItems}
+                    selectedGroupIds={selectedGroupIds}
+                    onToggleGroup={handleToggleGroup}
+                    keptByGroupId={keptByGroupId}
+                    onToggleKept={handleToggleKept}
+                    onTrashAll={handleTrashAllCopies}
+                  />
+                </>
+              )}
+              {state.status === "trashing" && (
+                <Box sx={{ display: "grid", gap: 1 }}>
+                  <Typography variant="body2" fontWeight={800}>
+                    Moving to trash
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
                     {state.trashedSoFar > 0
                       ? `${state.trashedSoFar.toLocaleString()} of ${state.totalToTrash.toLocaleString()} moved`
                       : "Starting..."}
                   </Typography>
+                  <LinearProgress
+                    variant="determinate"
+                    value={
+                      state.totalToTrash > 0
+                        ? (state.trashedSoFar / state.totalToTrash) * 100
+                        : 0
+                    }
+                  />
                 </Box>
-                <LinearProgress
-                  variant="determinate"
-                  value={
-                    state.totalToTrash > 0
-                      ? (state.trashedSoFar / state.totalToTrash) * 100
-                      : 0
-                  }
-                />
-              </Box>
-            )}
+              )}
+            </SidePanelTimelineStep>
+
+            <SidePanelSafetyFooter />
           </Box>
-        </Box>
+        ) : (
+          <Box
+            sx={{
+              display: "flex",
+              flexDirection: { xs: "column", md: "row" },
+              gap: 2.5,
+              alignItems: "flex-start"
+            }}>
+            {showWorkflowRail && (
+              <WorkflowRail
+                stage={workflowStage}
+                totalItems={workflowTotalItems}
+                totalGroupCount={workflowGroups.length}
+                exactGroupCount={workflowExactGroupCount}
+                similarGroupCount={workflowSimilarGroupCount}
+                duplicateCount={workflowDuplicateCount}
+                scanDetail={workflowScanDetail}
+                onRescan={handleReset}
+              />
+            )}
+
+            <Box sx={{ minWidth: 0, flex: 1, width: "100%" }}>
+              {state.status === "connecting" && (
+                <Box sx={{ display: "flex", justifyContent: "center", pt: 10 }}>
+                  <CircularProgress disableShrink />
+                </Box>
+              )}
+
+              {state.status === "disconnected" && (
+                <SidePanelConnectionSetup
+                  selectedProvider={settings.sourceProvider ?? "google"}
+                  onOpenProvider={handleOpenProvider}
+                  onRetry={handleReset}
+                  error={state.error}
+                />
+              )}
+
+              {state.status === "connected" && (
+                <ScanConfig
+                  settings={settings}
+                  onSettingsChange={setSettings}
+                  onStartScan={handleStartScan}
+                  onResumeScan={handleResumeScan}
+                  onDismissResume={handleDismissResume}
+                  onClearCache={handleClearCache}
+                  onRebuildCache={handleRebuildCache}
+                  onExportCacheDiagnostics={handleExportCacheDiagnostics}
+                  hasGptk={state.hasGptk}
+                  cacheEntryCount={cacheEntryCount}
+                  cacheStatus={cacheStatus}
+                  cacheBusy={cacheBusy}
+                  resumeCheckpoint={resumeCheckpoint}
+                  albums={albums}
+                albumsLoading={albumsLoading}
+                albumsError={albumsError}
+                onRefreshAlbums={() => requestAlbums(state.accountEmail)}
+                compact={isSidePanel}
+              />
+              )}
+
+              {state.status === "scanning" && (
+                <>
+                  <ScanProgress
+                    phase={state.phase}
+                    itemsProcessed={state.itemsProcessed}
+                    totalEstimate={state.totalEstimate}
+                    message={state.message}
+                    onPause={handlePauseScan}
+                  />
+                  {provisionalGroups.length > 0 && (
+                    <Box sx={{ mt: 3 }}>
+                      <Alert severity="info" sx={{ mb: 2 }}>
+                        Showing possible duplicate sets while the scan
+                        continues. Trash actions unlock after the scan
+                        completes.
+                      </Alert>
+                      <DuplicateGroups
+                        groups={provisionalGroups}
+                        mediaItems={displayMediaItems}
+                        selectedGroupIds={new Set()}
+                        onToggleGroup={() => {}}
+                        keptByGroupId={keptByGroupId}
+                        onToggleKept={() => {}}
+                        onTrashAll={() => {}}
+                        readOnly
+                        heading={`${provisionalGroups.length} Possible Duplicate Set${provisionalGroups.length !== 1 ? "s" : ""}`}
+                      />
+                    </Box>
+                  )}
+                </>
+              )}
+
+              {state.status === "results" &&
+                groups.length === 0 &&
+                storageChecked && (
+                  <Box
+                    sx={{
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      pt: 8,
+                      gap: 2
+                    }}>
+                    <Typography variant="h6" color="text.secondary">
+                      No duplicates found in your library.
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      For reuploads or copies taken years apart, use Full scan
+                      and move match sensitivity toward More matches.
+                    </Typography>
+                    <Button variant="contained" onClick={handleReset}>
+                      Change scan settings
+                    </Button>
+                  </Box>
+                )}
+
+              {state.status === "results" && groups.length > 0 && (
+                <>
+                  <ActionBar
+                    totalItems={state.totalItems}
+                    groupCount={visibleGroups.length}
+                    totalGroupCount={groups.length}
+                    exactGroupCount={exactGroupCount}
+                    similarGroupCount={similarGroupCount}
+                    duplicateCount={duplicateCount}
+                    reviewFilter={reviewFilter}
+                    onReviewFilterChange={setReviewFilter}
+                    onSelectAll={handleSelectAll}
+                    onDeselectAll={handleDeselectAll}
+                    onTrash={handleTrash}
+                    onRescan={handleReset}
+                    onExportJson={handleExportJson}
+                    onExportCsv={handleExportCsv}
+                    onApplyKeepStrategy={handleApplyKeepStrategy}
+                    compact={isSidePanel}
+                  />
+                  <DuplicateGroups
+                    groups={visibleGroups}
+                    mediaItems={displayMediaItems}
+                    selectedGroupIds={selectedGroupIds}
+                    onToggleGroup={handleToggleGroup}
+                    keptByGroupId={keptByGroupId}
+                    onToggleKept={handleToggleKept}
+                    onTrashAll={handleTrashAllCopies}
+                  />
+                </>
+              )}
+
+              {state.status === "trashing" && (
+                <Box sx={{ maxWidth: 480, mx: "auto", p: 4 }}>
+                  <Typography variant="h5" fontWeight={600} gutterBottom>
+                    Moving to Trash
+                  </Typography>
+                  <Box
+                    sx={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 1,
+                      mb: 2
+                    }}>
+                    <CircularProgress size={14} thickness={5} />
+                    <Typography variant="body2" color="text.secondary">
+                      {state.trashedSoFar > 0
+                        ? `${state.trashedSoFar.toLocaleString()} of ${state.totalToTrash.toLocaleString()} moved`
+                        : "Starting..."}
+                    </Typography>
+                  </Box>
+                  <LinearProgress
+                    variant="determinate"
+                    value={
+                      state.totalToTrash > 0
+                        ? (state.trashedSoFar / state.totalToTrash) * 100
+                        : 0
+                    }
+                  />
+                </Box>
+              )}
+              {isSidePanel && state.status !== "trashing" && (
+                <Box
+                  sx={{
+                    mt: 1,
+                    px: 1,
+                    py: 1.25,
+                    border: "1px solid",
+                    borderColor: "divider",
+                    borderRadius: 2,
+                    bgcolor: "#FFFFFF",
+                    display: "grid",
+                    gap: 0.35
+                  }}>
+                  <Typography
+                    variant="caption"
+                    fontWeight={800}
+                    color="success.dark">
+                    Safe cleanup
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    Matching runs locally. Confirmed items move to provider
+                    Trash and a report is saved before cleanup.
+                  </Typography>
+                </Box>
+              )}
+            </Box>
+          </Box>
+        )}
       </Box>
 
       {/* Trash confirm dialog */}
@@ -2364,9 +3345,9 @@ export default function App() {
           <DialogContentText>
             Move {trashConfirm?.dedupKeys.length} duplicate
             {trashConfirm?.dedupKeys.length !== 1 ? "s" : ""} to trash? You can
-            restore them from the Google Photos trash. A JSON audit report will
-            be saved before anything is moved. Items are moved in batches of{" "}
-            {TRASH_BATCH_SIZE}.
+            restore them from the {providerLabel(settings.sourceProvider)}{" "}
+            trash. A JSON audit report will be saved before anything is moved.
+            Items are moved in batches of {TRASH_BATCH_SIZE}.
           </DialogContentText>
           <TextField
             autoFocus

@@ -1,7 +1,7 @@
 {
   "name": "google-photos-deduper",
   "displayName": "Google Photos Deduper",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "description": "Find and remove duplicate photos from Google Photos",
   "author": "Mack Talcott",
   "scripts": {
@@ -58,16 +58,26 @@
     "vitest": "^4.1.2"
   },
   "manifest": {
+    "side_panel": {
+      "default_path": "tabs/scanner-panel.html"
+    },
     "permissions": [
       "activeTab",
+      "sidePanel",
       "tabs",
       "scripting",
+      "webNavigation",
       "storage",
       "unlimitedStorage"
     ],
     "host_permissions": [
       "https://photos.google.com/*",
       "https://www.icloud.com/*",
+      "https://*.icloud-content.com/*",
+      "https://www.amazon.ca/*",
+      "https://thumbnails-photos.amazon.ca/*",
+      "https://*.media-amazon.com/*",
+      "https://*.ssl-images-amazon.com/*",
       "https://*.googleusercontent.com/*",
       "https://*.usercontent.google.com/*",
       "https://*.googleapis.com/*"
@@ -82,6 +92,7 @@
           "scripts/google-photos-toolkit.user.js",
           "scripts/google-photos-commands.js",
           "scripts/icloud-photos-commands.js",
+          "scripts/amazon-photos-commands.js",
           "scripts/vision_wasm_internal.js",
           "scripts/vision_wasm_internal.wasm",
           "scripts/embedder-worker.js",
@@ -89,7 +100,8 @@
         ],
         "matches": [
           "https://photos.google.com/*",
-          "https://www.icloud.com/*"
+          "https://www.icloud.com/*",
+          "https://www.amazon.ca/*"
         ]
       }
     ]

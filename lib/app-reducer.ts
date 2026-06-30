@@ -143,14 +143,20 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         const providerName =
           action.payload.provider === "icloud"
             ? "iCloud Photos"
-            : "Google Photos"
+            : action.payload.provider === "amazon"
+              ? "Amazon Photos"
+              : "Google Photos"
         const providerUrl =
           action.payload.provider === "icloud"
             ? "icloud.com/photos"
-            : "photos.google.com"
+            : action.payload.provider === "amazon"
+              ? "amazon.ca/photos?sf=1"
+              : "photos.google.com"
         return {
           status: "disconnected",
-          error: `Cannot connect to ${providerName}. Please open ${providerUrl} in another tab.`
+          error:
+            action.payload.error ??
+            `Cannot connect to ${providerName}. Open ${providerUrl}, sign in, wait for your library to load, then click Retry.`
         }
       }
 

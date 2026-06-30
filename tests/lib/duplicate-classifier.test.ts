@@ -34,6 +34,16 @@ describe("duplicate classifier", () => {
     expect(result.matchReasons).toContain("same dedupKey")
   })
 
+  it("classifies identical provider content hashes as exact", () => {
+    const result = classifyDuplicateItems([
+      item("a", { dedupKey: "node-a", exactContentHash: "amazon-md5-same" }),
+      item("b", { dedupKey: "node-b", exactContentHash: "amazon-md5-same" })
+    ])
+
+    expect(result.duplicateKind).toBe("exact")
+    expect(result.matchReasons).toContain("same content hash")
+  })
+
   it("classifies same filename, dimensions, and taken date as exact", () => {
     const result = classifyDuplicateItems([
       item("a", { fileName: "IMG.jpg" }),

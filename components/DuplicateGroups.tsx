@@ -415,7 +415,9 @@ const DuplicateGroupRow = memo(function DuplicateGroupRow({
                     src={
                       item.thumb.startsWith("data:")
                         ? item.thumb
-                        : item.thumb + "=h200"
+                        : item.provider && item.provider !== "google"
+                          ? item.thumb
+                          : item.thumb + "=h200"
                     }
                     alt={item.fileName || item.mediaKey}
                   />

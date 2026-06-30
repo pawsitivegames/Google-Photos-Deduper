@@ -60,6 +60,25 @@ describe("scan checkpoint", () => {
     expect(shouldOfferResume(checkpoint)).toBe(false)
   })
 
+  it("does not offer provider test-batch checkpoints as resumable full scans", () => {
+    const checkpoint = createScanCheckpoint({
+      id: "req-1",
+      settings: {
+        sourceProvider: "icloud",
+        scanMode: "full",
+        similarityThreshold: 0.98,
+        icloudBatchLimit: 50
+      }
+    })
+
+    expect(
+      shouldOfferResume({
+        ...checkpoint,
+        status: "error"
+      })
+    ).toBe(false)
+  })
+
   it("summarizes scoped and full-library scans", () => {
     expect(
       summarizeScanCheckpoint(

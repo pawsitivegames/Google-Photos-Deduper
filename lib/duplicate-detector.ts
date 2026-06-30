@@ -126,9 +126,28 @@ function isVideo(item: GpdMediaItem): boolean {
   return Number.isFinite(item.duration) && (item.duration ?? 0) > 0
 }
 
+function providerConnectionLabel(provider: GpdMediaItem["provider"]): string {
+  if (provider === "icloud") return "iCloud Photos"
+  if (provider === "amazon") return "Amazon Photos"
+  return "Google Photos"
+}
+
+function processedCandidateError(
+  processed: number,
+  total: number,
+  provider: GpdMediaItem["provider"]
+): Error {
+  return new Error(
+    `Only ${processed} of ${total} candidate items could be processed. Check your ${providerConnectionLabel(provider)} connection and retry.`
+  )
+}
+
 function haveCloseVideoDuration(a: GpdMediaItem, b: GpdMediaItem): boolean {
   if (!isVideo(a) || !isVideo(b)) return false
-  return Math.abs((a.duration ?? 0) - (b.duration ?? 0)) <= VIDEO_DURATION_TOLERANCE_MS
+  return (
+    Math.abs((a.duration ?? 0) - (b.duration ?? 0)) <=
+    VIDEO_DURATION_TOLERANCE_MS
+  )
 }
 
 export function findDedupKeyDuplicateGroups(
@@ -140,6 +159,21 @@ export function findDedupKeyDuplicateGroups(
     const bucket = buckets.get(item.dedupKey) ?? []
     bucket.push(item)
     buckets.set(item.dedupKey, bucket)
+  }
+  return [...buckets.values()]
+    .filter((group) => group.length >= 2)
+    .map(sortGroupItems)
+}
+
+export function findExactContentDuplicateGroups(
+  items: GpdMediaItem[]
+): GpdMediaItem[][] {
+  const buckets = new Map<string, GpdMediaItem[]>()
+  for (const item of items) {
+    if (!item.exactContentHash) continue
+    const bucket = buckets.get(item.exactContentHash) ?? []
+    bucket.push(item)
+    buckets.set(item.exactContentHash, bucket)
   }
   return [...buckets.values()]
     .filter((group) => group.length >= 2)
@@ -330,6 +364,7 @@ export async function fullDetectDuplicates(
   const candidates = mediaItems.filter((item) => item.thumb)
   const exactMetadataGroups = mergeDuplicateItemGroups([
     ...findDedupKeyDuplicateGroups(candidates),
+    ...findExactContentDuplicateGroups(candidates),
     ...findVideoMetadataDuplicateGroups(candidates)
   ])
   console.log(
@@ -424,12 +459,18 @@ export async function fullDetectDuplicates(
         groups: exactMetadataGroups.map((items, i) =>
           buildDuplicateGroup(items, i, threshold)
         ),
-        timing: emptyTiming({ cacheHits, fetchThumbnailsMs, computeEmbeddingsMs })
+        timing: emptyTiming({
+          cacheHits,
+          fetchThumbnailsMs,
+          computeEmbeddingsMs
+        })
       }
     }
     if (candidates.length >= 2) {
-      throw new Error(
-        `Only ${embeddings.length} of ${candidates.length} candidate items could be processed. Check your Google Photos connection and retry.`
+      throw processedCandidateError(
+        embeddings.length,
+        candidates.length,
+        candidates[0]?.provider
       )
     }
     return {
@@ -467,7 +508,9 @@ export async function fullDetectDuplicates(
     workerUrl,
     trackedProgress,
     signal,
-    onPartialGroups ? (groups) => onPartialGroups(buildGroups(groups)) : undefined
+    onPartialGroups
+      ? (groups) => onPartialGroups(buildGroups(groups))
+      : undefined
   )
   const communityDetectionMs = Math.round(performance.now() - t3)
   const totalMs = Math.round(performance.now() - scanStart)
@@ -545,6 +588,48 @@ export function groupByTimestamp(
   return [...buckets.values()].filter((g) => g.length >= 2)
 }
 
+export function groupByProviderSequence(
+  items: GpdMediaItem[],
+  neighborRadius = 1,
+  maxTimestampDistanceMs = 60_000
+): GpdMediaItem[][] {
+  if (neighborRadius <= 0) return []
+
+  const byProvider = new Map<string, GpdMediaItem[]>()
+  for (const item of items) {
+    if (!Number.isFinite(item.sequenceIndex)) continue
+    const provider = item.provider ?? "unknown"
+    const group = byProvider.get(provider) ?? []
+    group.push(item)
+    byProvider.set(provider, group)
+  }
+
+  const groups: GpdMediaItem[][] = []
+  for (const group of byProvider.values()) {
+    const sorted = [...group].sort(
+      (a, b) => (a.sequenceIndex ?? 0) - (b.sequenceIndex ?? 0)
+    )
+    for (let i = 0; i < sorted.length; i++) {
+      for (
+        let j = i + 1;
+        j < sorted.length && j <= i + neighborRadius;
+        j++
+      ) {
+        if (
+          Number.isFinite(maxTimestampDistanceMs) &&
+          maxTimestampDistanceMs > 0 &&
+          Math.abs(sorted[i].timestamp - sorted[j].timestamp) >
+            maxTimestampDistanceMs
+        ) {
+          continue
+        }
+        groups.push([sorted[i], sorted[j]])
+      }
+    }
+  }
+  return groups
+}
+
 export function shouldCompareSmartTimestamps(
   a: number,
   b: number,
@@ -618,6 +703,7 @@ async function runSmartDetectionInWorker(
   embeddings: Float32Array[],
   threshold: number,
   buckets: number[][],
+  comparePairs: number[][],
   timestamps: number[],
   windowMs: number,
   workerUrl: string,
@@ -681,7 +767,16 @@ async function runSmartDetectionInWorker(
     worker.postMessage(
       {
         type: "detectSmart",
-        data: { flatEmbeddings: flat, n, dim, threshold, buckets, timestamps, windowMs }
+        data: {
+          flatEmbeddings: flat,
+          n,
+          dim,
+          threshold,
+          buckets,
+          comparePairs,
+          timestamps,
+          windowMs
+        }
       },
       [flat.buffer]
     )
@@ -704,17 +799,20 @@ export async function smartDetectDuplicates(
   const candidates = mediaItems.filter((item) => item.thumb)
   const exactMetadataGroups = mergeDuplicateItemGroups([
     ...findDedupKeyDuplicateGroups(candidates),
+    ...findExactContentDuplicateGroups(candidates),
     ...findVideoMetadataDuplicateGroups(candidates)
   ])
 
   // Step 1: Bucket by timestamp — no I/O, instant
-  const buckets = groupByTimestamp(candidates, windowMs)
+  const timestampBuckets = groupByTimestamp(candidates, windowMs)
+  const sequenceBuckets = groupByProviderSequence(candidates)
+  const embeddingCandidateBuckets = [...timestampBuckets, ...sequenceBuckets]
   console.log(
-    `[GPD] smartDetectDuplicates: ${mediaItems.length} items → ${candidates.length} candidates → ${buckets.length} timestamp buckets`
+    `[GPD] smartDetectDuplicates: ${mediaItems.length} items → ${candidates.length} candidates → ${timestampBuckets.length} timestamp buckets, ${sequenceBuckets.length} sequence pairs`
   )
-  const subset = smartScanEmbeddingCandidates(candidates, buckets)
+  const subset = smartScanEmbeddingCandidates(candidates, embeddingCandidateBuckets)
 
-  if (buckets.length === 0 && exactMetadataGroups.length > 0) {
+  if (embeddingCandidateBuckets.length === 0 && exactMetadataGroups.length > 0) {
     return exactMetadataGroups.map((items, i) =>
       buildDuplicateGroup(items, i, threshold)
     )
@@ -795,8 +893,10 @@ export async function smartDetectDuplicates(
       )
     }
     if (subset.length >= 2) {
-      throw new Error(
-        `Only ${embeddings.length} of ${subset.length} candidate items could be processed. Check your Google Photos connection and retry.`
+      throw processedCandidateError(
+        embeddings.length,
+        subset.length,
+        subset[0]?.provider
       )
     }
     return []
@@ -807,13 +907,20 @@ export async function smartDetectDuplicates(
   for (let i = 0; i < validIndices.length; i++)
     mediaKeyToEmbIdx.set(subset[validIndices[i]].mediaKey, i)
 
-  const workerBuckets = buckets
+  const workerBuckets = timestampBuckets
     .map((bucket) =>
       bucket
         .map((item) => mediaKeyToEmbIdx.get(item.mediaKey))
         .filter((i): i is number => i !== undefined)
     )
     .filter((b) => b.length >= 2)
+  const workerComparePairs = sequenceBuckets
+    .map((bucket) =>
+      bucket
+        .map((item) => mediaKeyToEmbIdx.get(item.mediaKey))
+        .filter((i): i is number => i !== undefined)
+    )
+    .filter((b) => b.length === 2)
   const workerTimestamps = validIndices.map((idx) => subset[idx].timestamp)
   const videoPosterGroups = findVideoPosterDuplicateGroups(
     subset,
@@ -822,7 +929,7 @@ export async function smartDetectDuplicates(
     threshold
   )
 
-  if (workerBuckets.length === 0) {
+  if (workerBuckets.length === 0 && workerComparePairs.length === 0) {
     return mergeDuplicateItemGroups([
       ...exactMetadataGroups,
       ...videoPosterGroups
@@ -847,12 +954,15 @@ export async function smartDetectDuplicates(
     embeddings,
     threshold,
     workerBuckets,
+    workerComparePairs,
     workerTimestamps,
     windowMs,
     workerUrl,
     trackedProgress,
     signal,
-    onPartialGroups ? (groups) => onPartialGroups(buildGroups(groups)) : undefined
+    onPartialGroups
+      ? (groups) => onPartialGroups(buildGroups(groups))
+      : undefined
   )
   const communityDetectionMs = Math.round(performance.now() - t3)
   const totalMs = Math.round(performance.now() - scanStart)
@@ -910,7 +1020,9 @@ async function fetchThumbnails(
       try {
         const url = entry.item.thumb.startsWith("data:")
           ? entry.item.thumb
-          : entry.item.thumb + `=h${THUMB_HEIGHT}`
+          : entry.item.provider && entry.item.provider !== "google"
+            ? entry.item.thumb
+            : entry.item.thumb + `=h${THUMB_HEIGHT}`
         const response = await fetch(url, {
           credentials: "include",
           signal: (
@@ -1255,7 +1367,9 @@ async function runCommunityDetectionInWorker(
           return
         }
         rejectOnce(
-          new Error(`Unexpected worker response during block comparison: ${e.data.type}`)
+          new Error(
+            `Unexpected worker response during block comparison: ${e.data.type}`
+          )
         )
       }
       worker.onerror = (e) =>
@@ -1294,7 +1408,6 @@ async function runCommunityDetectionInWorker(
       reject(new DOMException("Aborted", "AbortError"))
     }
     signal?.addEventListener("abort", onAbort, { once: true })
-
     ;(async () => {
       try {
         let completed = 0
@@ -1324,7 +1437,6 @@ async function runCommunityDetectionInWorker(
         reject(error)
       }
     })()
-
   })
 }
 

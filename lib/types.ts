@@ -9,6 +9,7 @@ export const APP_ID = "GPD" as const
 
 interface BaseMessage {
   app: typeof APP_ID
+  clientId?: string
 }
 
 // ============================================================
@@ -17,6 +18,20 @@ interface BaseMessage {
 
 export interface LaunchAppMessage extends BaseMessage {
   action: "launchApp"
+}
+
+export interface LaunchProviderMessage extends BaseMessage {
+  action: "launchProvider"
+  provider?: PhotoProvider
+  hostTabId?: number
+}
+
+export interface LaunchProviderResult {
+  success: boolean
+  provider: PhotoProvider
+  tabId?: number
+  alreadyOpen?: boolean
+  error?: string
 }
 
 export interface HealthCheckMessage extends BaseMessage {
@@ -30,6 +45,7 @@ export interface HealthCheckResultMessage extends BaseMessage {
   hasGptk: boolean
   provider?: PhotoProvider
   accountEmail?: string
+  error?: string
 }
 
 // ============================================================
@@ -42,7 +58,7 @@ export interface ScanLibraryMessage extends BaseMessage {
 }
 
 export type ScanMode = "smart" | "full"
-export type PhotoProvider = "google" | "icloud"
+export type PhotoProvider = "google" | "icloud" | "amazon"
 
 export interface ScanOptions {
   similarityThreshold: number // 0.90 - 1.00
@@ -140,6 +156,7 @@ export interface GptkLogMessage extends BaseMessage {
 
 export type AppMessage =
   | LaunchAppMessage
+  | LaunchProviderMessage
   | HealthCheckMessage
   | HealthCheckResultMessage
   | ScanLibraryMessage
@@ -161,9 +178,11 @@ export type AppMessage =
 export interface GpdMediaItem {
   mediaKey: string
   dedupKey: string
+  exactContentHash?: string
   thumb: string // thumbnail URL (append =w200-h200 for thumbnails; use bare for full-res)
-  productUrl?: string // link to item in Google Photos web app
+  productUrl?: string // link to item in the provider's web app
   provider?: PhotoProvider
+  sequenceIndex?: number // provider list order, used as a smart-scan neighbor hint
   timestamp: number // taken date
   creationTimestamp: number // upload date
   resWidth?: number
@@ -236,6 +255,8 @@ export interface ScanSettings {
     to?: string
   }
   albumScope?: ScanAlbumScope
+  amazonBatchLimit?: number
+  icloudBatchLimit?: number
 }
 
 export interface ScanAlbumScope {

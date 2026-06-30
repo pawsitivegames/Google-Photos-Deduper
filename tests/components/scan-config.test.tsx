@@ -6,7 +6,7 @@
  * drives `onSettingsChange({ smartWindowSec })`.
  */
 import { createTheme, ThemeProvider } from "@mui/material/styles"
-import { fireEvent, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest"
 
 import { ScanConfig } from "../../components/ScanConfig"
@@ -19,7 +19,10 @@ import type { ScanSettings } from "../../lib/types"
 
 const theme = createTheme()
 
-function renderConfig(settings: Partial<ScanSettings> = {}) {
+function renderConfig(
+  settings: Partial<ScanSettings> = {},
+  options: { compact?: boolean; hasGptk?: boolean } = {}
+) {
   const onSettingsChange = vi.fn()
   const onStartScan = vi.fn()
   const full: ScanSettings = {
@@ -37,7 +40,7 @@ function renderConfig(settings: Partial<ScanSettings> = {}) {
         onClearCache={vi.fn()}
         onRebuildCache={vi.fn()}
         onExportCacheDiagnostics={vi.fn()}
-        hasGptk={true}
+        hasGptk={options.hasGptk ?? true}
         cacheEntryCount={12}
         albums={[
           {
@@ -53,6 +56,7 @@ function renderConfig(settings: Partial<ScanSettings> = {}) {
             isShared: true
           }
         ]}
+        compact={options.compact}
       />
     </ThemeProvider>
   )
@@ -264,16 +268,65 @@ describe("ScanConfig — photo source", () => {
     })
   })
 
-  it("labels iCloud scans and hides Google album controls", () => {
+  it("uses shared scan controls for iCloud and hides Google album controls", () => {
     renderConfig({ sourceProvider: "icloud" })
 
     expect(
-      screen.getByRole("button", { name: /Check loaded iCloud photos/i })
+      screen.getByRole("button", { name: /Check entire library/i })
     ).toBeInTheDocument()
-    expect(
-      screen.getByText(/Trash and restore actions remain/i)
-    ).toBeInTheDocument()
+    expect(screen.getByText(/dry-run test mode only/i)).toBeInTheDocument()
 
+    fireEvent.click(screen.getByRole("button", { name: /More options/i }))
+    expect(
+      screen.queryByRole("combobox", { name: /Library area/i })
+    ).not.toBeInTheDocument()
+    expect(screen.getByText(/iCloud test batch size/i)).toBeInTheDocument()
+  })
+
+  it("keeps compact iCloud scope focused on scan controls when connected", () => {
+    renderConfig({ sourceProvider: "icloud" }, { compact: true, hasGptk: false })
+
+    expect(
+      screen.getByRole("button", { name: /Check entire library/i })
+    ).toBeInTheDocument()
+    expect(screen.getByText(/Leave iCloud Photos open/i)).toBeInTheDocument()
+    expect(screen.queryByText(/Choose photo source/i)).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole("button", { name: /Retry connection/i })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByText(/iCloud Photos is not connected/i)
+    ).not.toBeInTheDocument()
+  })
+
+  it("labels iCloud capped scans as test batches", () => {
+    renderConfig({ sourceProvider: "icloud", icloudBatchLimit: 50 })
+
+    expect(
+      screen.getByRole("button", { name: /Check 50 item test batch/i })
+    ).toBeInTheDocument()
+    expect(screen.getByText(/Test batch is on/i)).toBeInTheDocument()
+  })
+
+  it("switches to Amazon Photos and uses shared scan controls", () => {
+    const { onSettingsChange } = renderConfig()
+
+    fireEvent.click(screen.getByRole("button", { name: /Amazon Photos/i }))
+
+    expect(onSettingsChange).toHaveBeenCalledWith({
+      sourceProvider: "amazon",
+      albumScope: undefined
+    })
+
+    cleanup()
+    renderConfig({ sourceProvider: "amazon" })
+    expect(
+      screen.getByRole("link", { name: /Open Amazon Photos/i })
+    ).toHaveAttribute("href", "https://www.amazon.ca/photos?sf=1")
+    expect(
+      screen.getByRole("button", { name: /Check entire library/i })
+    ).toBeInTheDocument()
+    expect(screen.getByText(/Amazon Photos trash/i)).toBeInTheDocument()
     fireEvent.click(screen.getByRole("button", { name: /More options/i }))
     expect(
       screen.queryByRole("combobox", { name: /Library area/i })

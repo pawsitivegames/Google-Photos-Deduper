@@ -4,9 +4,11 @@ import {
   communityDetection,
   computeEmbeddings,
   findDedupKeyDuplicateGroups,
+  findExactContentDuplicateGroups,
   findVideoMetadataDuplicateGroups,
   findVideoPosterDuplicateGroups,
   fullDetectDuplicates,
+  groupByProviderSequence,
   groupByTimestamp,
   matMul,
   mergeDuplicateItemGroups,
@@ -439,6 +441,33 @@ describe("video metadata duplicate detection", () => {
     expect(groups[0].map((item) => item.mediaKey)).toEqual(["a", "b"])
   })
 
+  it("groups exact matches by provider content hash without changing provider node ids", () => {
+    const groups = findExactContentDuplicateGroups([
+      makeItem("amazon-a", 1000, 100, {
+        dedupKey: "node-a",
+        exactContentHash: "amazon-md5-same",
+        duration: 12_345,
+        fileName: "clip-a.mp4"
+      }),
+      makeItem("amazon-b", 2000, 200, {
+        dedupKey: "node-b",
+        exactContentHash: "amazon-md5-same",
+        duration: 12_345,
+        fileName: "clip-b.mp4"
+      })
+    ])
+
+    expect(groups).toHaveLength(1)
+    expect(groups[0].map((item) => item.mediaKey)).toEqual([
+      "amazon-a",
+      "amazon-b"
+    ])
+    expect(groups[0].map((item) => item.dedupKey)).toEqual([
+      "node-a",
+      "node-b"
+    ])
+  })
+
   it("groups videos with matching duration, dimensions, and filename even when upload dates differ", () => {
     const groups = findVideoMetadataDuplicateGroups([
       makeItem("old-upload", 1000, 100, {
@@ -637,6 +666,31 @@ describe("video metadata duplicate detection", () => {
     expect(groups[0].duplicateKind).toBe("exact")
   })
 
+  it("lets smart mode catch exact-content videos outside the time window", async () => {
+    const groups = await smartDetectDuplicates(
+      [
+        makeItem("old-upload", Date.parse("2021-01-01"), 100, {
+          dedupKey: "node-a",
+          exactContentHash: "amazon-md5-same",
+          duration: 12_345,
+          fileName: "clip-a.mp4"
+        }),
+        makeItem("new-upload", Date.parse("2024-01-01"), 200, {
+          dedupKey: "node-b",
+          exactContentHash: "amazon-md5-same",
+          duration: 12_345,
+          fileName: "clip-b.mp4"
+        })
+      ],
+      0.95,
+      1000
+    )
+
+    expect(groups).toHaveLength(1)
+    expect(groups[0].mediaKeys).toEqual(["old-upload", "new-upload"])
+    expect(groups[0].duplicateKind).toBe("exact")
+  })
+
   it("keeps far-apart videos in the smart embedding subset for poster matching", () => {
     const nearbyPhotoA = makeItem("photo-a", 1000)
     const nearbyPhotoB = makeItem("photo-b", 1100)
@@ -744,6 +798,57 @@ describe("groupByTimestamp", () => {
     )
     expect(result).toHaveLength(1)
     expect(result[0].map((item) => item.mediaKey)).toEqual(["a", "b", "c"])
+  })
+})
+
+describe("groupByProviderSequence", () => {
+  it("groups adjacent items from the same provider order", () => {
+    const a = makeItem("a", 1000, 0, {
+      provider: "icloud",
+      sequenceIndex: 151,
+    })
+    const b = makeItem("b", 5032, 0, {
+      provider: "icloud",
+      sequenceIndex: 152,
+    })
+
+    const result = groupByProviderSequence([a, b])
+
+    expect(result).toHaveLength(1)
+    expect(result[0].map((item) => item.mediaKey)).toEqual(["a", "b"])
+  })
+
+  it("keeps different providers in separate sequence groups", () => {
+    const a = makeItem("a", 1000, 0, {
+      provider: "icloud",
+      sequenceIndex: 1,
+    })
+    const b = makeItem("b", 1000, 0, {
+      provider: "google",
+      sequenceIndex: 2,
+    })
+
+    expect(groupByProviderSequence([a, b])).toEqual([])
+  })
+
+  it("ignores items without provider sequence metadata", () => {
+    const a = makeItem("a", 1000)
+    const b = makeItem("b", 2000)
+
+    expect(groupByProviderSequence([a, b])).toEqual([])
+  })
+
+  it("does not group adjacent provider items when their timestamps are far apart", () => {
+    const a = makeItem("a", 1000, 0, {
+      provider: "icloud",
+      sequenceIndex: 1,
+    })
+    const b = makeItem("b", 3_601_000, 0, {
+      provider: "icloud",
+      sequenceIndex: 2,
+    })
+
+    expect(groupByProviderSequence([a, b])).toEqual([])
   })
 })
 

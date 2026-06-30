@@ -72,7 +72,10 @@ export function updateScanCheckpoint(
 export function shouldOfferResume(
   checkpoint: ScanCheckpoint | null | undefined
 ): checkpoint is ScanCheckpoint {
-  return checkpoint?.status === "interrupted" || checkpoint?.status === "error"
+  if (checkpoint?.status !== "interrupted" && checkpoint?.status !== "error") {
+    return false
+  }
+  return !checkpoint.settings.amazonBatchLimit && !checkpoint.settings.icloudBatchLimit
 }
 
 export function summarizeScanCheckpoint(checkpoint: ScanCheckpoint): string {

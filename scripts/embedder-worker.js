@@ -4120,7 +4120,16 @@
       self.postMessage({ type: "blockResults", pairs });
     }
     if (type === "detectSmart") {
-      const { flatEmbeddings, n: n2, dim, threshold, buckets, timestamps, windowMs } = data;
+      const {
+        flatEmbeddings,
+        n: n2,
+        dim,
+        threshold,
+        buckets,
+        comparePairs,
+        timestamps,
+        windowMs
+      } = data;
       const embeddings = [];
       for (let i2 = 0; i2 < n2; i2++)
         embeddings.push(flatEmbeddings.subarray(i2 * dim, (i2 + 1) * dim));
@@ -4160,6 +4169,14 @@
         }
         if (shouldReportProgress)
           self.postMessage({ type: "detectionProgress", current: bi2 + 1, total: buckets.length });
+      }
+      for (const pair of comparePairs || []) {
+        const a2 = embeddings[pair[0]];
+        const b2 = embeddings[pair[1]];
+        if (!a2 || !b2) continue;
+        let dot = 0;
+        for (let k2 = 0; k2 < dim; k2++) dot += a2[k2] * b2[k2];
+        if (dot >= threshold) allGroups.push(pair);
       }
       self.postMessage({ type: "detectionResults", groups: allGroups });
     }

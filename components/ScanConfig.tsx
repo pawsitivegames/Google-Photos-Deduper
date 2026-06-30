@@ -1,4 +1,6 @@
+import CloudQueueRoundedIcon from "@mui/icons-material/CloudQueueRounded"
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore"
+import OpenInNewRoundedIcon from "@mui/icons-material/OpenInNewRounded"
 import PhotoLibraryRoundedIcon from "@mui/icons-material/PhotoLibraryRounded"
 import SearchRoundedIcon from "@mui/icons-material/SearchRounded"
 import WarningAmberRoundedIcon from "@mui/icons-material/WarningAmberRounded"
@@ -23,7 +25,7 @@ import {
   describeScanCheckpointResume,
   summarizeScanCheckpoint
 } from "../lib/scan-checkpoint"
-import type { GpdAlbum, ScanSettings } from "../lib/types"
+import type { GpdAlbum, PhotoProvider, ScanSettings } from "../lib/types"
 
 function formatWindow(sec: number): string {
   if (sec < 60) return `${sec}s`
@@ -37,6 +39,41 @@ function isDateRangeInvalid(settings: ScanSettings): boolean {
   const from = settings.dateRange?.from
   const to = settings.dateRange?.to
   return !!(from && to && from > to)
+}
+
+function providerUrl(provider: ScanSettings["sourceProvider"]): string {
+  if (provider === "icloud") return "https://www.icloud.com/photos"
+  if (provider === "amazon") return "https://www.amazon.ca/photos?sf=1"
+  return "https://photos.google.com/"
+}
+
+function providerLabel(provider: ScanSettings["sourceProvider"]): string {
+  if (provider === "icloud") return "iCloud Photos"
+  if (provider === "amazon") return "Amazon Photos"
+  return "Google Photos"
+}
+
+function providerHelpText(provider: ScanSettings["sourceProvider"]): string {
+  if (provider === "icloud") {
+    return "Scan iCloud Photos by walking the full web grid. Trash actions run in dry-run test mode only."
+  }
+  if (provider === "amazon") {
+    return "Scan Amazon Photos through the signed-in Canada web session. Confirmed trash actions move selected duplicates to Amazon Photos trash."
+  }
+  return "Best for full duplicate cleanup. You can scan the whole timeline, an album, or a date range, then move duplicates to Google Photos trash."
+}
+
+function providerBatchLimit(settings: ScanSettings): number | undefined {
+  const provider = settings.sourceProvider ?? "google"
+  const limit =
+    provider === "amazon"
+      ? settings.amazonBatchLimit
+      : provider === "icloud"
+        ? settings.icloudBatchLimit
+        : undefined
+  return typeof limit === "number" && Number.isFinite(limit) && limit > 0
+    ? Math.floor(limit)
+    : undefined
 }
 
 interface ScanConfigProps {
@@ -57,6 +94,7 @@ interface ScanConfigProps {
   albumsLoading?: boolean
   albumsError?: string | null
   onRefreshAlbums?: () => void
+  compact?: boolean
 }
 
 export function ScanConfig({
@@ -76,73 +114,96 @@ export function ScanConfig({
   albums = [],
   albumsLoading = false,
   albumsError = null,
-  onRefreshAlbums
+  onRefreshAlbums,
+  compact = false
 }: ScanConfigProps) {
   const dateRangeInvalid = isDateRangeInvalid(settings)
   const albumLabel = settings.albumScope?.title || settings.albumScope?.mediaKey
   const sourceProvider = settings.sourceProvider ?? "google"
   const isIcloud = sourceProvider === "icloud"
+  const isAmazon = sourceProvider === "amazon"
+  const supportsAlbumScope = sourceProvider === "google"
+  const batchLimit = providerBatchLimit(settings)
   const hasScanScope = Boolean(
     settings.albumScope || settings.dateRange?.from || settings.dateRange?.to
   )
   const showUnscopedFullScanWarning =
-    settings.scanMode === "full" && !hasScanScope && !isIcloud
-
-  if (!hasGptk) {
+    settings.scanMode === "full" && !hasScanScope
+  if (!hasGptk && sourceProvider === "google") {
+    if (compact) {
+      return (
+        <Box sx={{ maxWidth: "100%", mx: "auto" }}>
+          <Alert severity="warning" icon={<WarningAmberRoundedIcon />}>
+            Google Photos is not connected. Sign in, wait for your library to
+            load, then retry.
+          </Alert>
+        </Box>
+      )
+    }
     return (
-      <Box sx={{ maxWidth: 480, mx: "auto", p: 4 }}>
+      <Box sx={{ maxWidth: 480, mx: "auto", p: compact ? 1 : 4 }}>
         <Alert severity="warning" icon={<WarningAmberRoundedIcon />}>
           {isIcloud
             ? "iCloud Photos is not connected. Please open icloud.com/photos, sign in, and try again."
-            : "GPTK is not loaded on the Google Photos page. Please reload photos.google.com and try again."}
+            : isAmazon
+              ? "Amazon Photos is not connected. Please open amazon.ca/photos?sf=1, sign in, and try again."
+              : "GPTK is not loaded on the Google Photos page. Please reload photos.google.com and try again."}
         </Alert>
       </Box>
     )
   }
 
   return (
-    <Box sx={{ maxWidth: 900, mx: "auto", py: { xs: 2, md: 6 } }}>
+    <Box
+      sx={{
+        maxWidth: compact ? "100%" : 900,
+        mx: "auto",
+        py: compact ? 0 : { xs: 2, md: 6 }
+      }}>
       <Paper
         elevation={0}
         sx={{
-          p: { xs: 2.5, md: 4 },
+          p: compact ? 0 : { xs: 2.5, md: 4 },
           border: "1px solid",
-          borderColor: "divider",
-          borderRadius: 3,
-          bgcolor: "rgba(255,255,255,0.78)",
-          backdropFilter: "saturate(180%) blur(22px)",
-          boxShadow: "0 24px 70px rgba(0, 0, 0, 0.08)"
+          borderColor: compact ? "transparent" : "divider",
+          borderRadius: compact ? 2 : 3,
+          bgcolor: compact ? "transparent" : "rgba(255,255,255,0.78)",
+          backdropFilter: compact ? "none" : "saturate(180%) blur(22px)",
+          boxShadow: compact ? "none" : "0 24px 70px rgba(0, 0, 0, 0.08)"
         }}>
-        <Box
-          sx={{
-            display: "flex",
-            flexDirection: { xs: "column", md: "row" },
-            gap: 3,
-            mb: 3
-          }}>
+        {!compact && (
           <Box
             sx={{
-              width: 56,
-              height: 56,
-              borderRadius: 3,
-              bgcolor: "primary.light",
-              color: "primary.main",
-              display: "grid",
-              placeItems: "center",
-              flexShrink: 0
+              display: "flex",
+              flexDirection: { xs: "column", md: "row" },
+              gap: 3,
+              mb: 3,
+              alignItems: { md: "center" }
             }}>
-            <PhotoLibraryRoundedIcon />
+            <Box
+              sx={{
+                width: 56,
+                height: 56,
+                borderRadius: 3,
+                bgcolor: "primary.light",
+                color: "primary.main",
+                display: "grid",
+                placeItems: "center",
+                flexShrink: 0
+              }}>
+              <PhotoLibraryRoundedIcon />
+            </Box>
+            <Box sx={{ flex: 1 }}>
+              <Typography variant="h5" fontWeight={800} gutterBottom>
+                Find duplicates from your photo library
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Pick the source, choose the part of the library to check, then
+                review what should stay before anything moves to trash.
+              </Typography>
+            </Box>
           </Box>
-          <Box sx={{ flex: 1 }}>
-            <Typography variant="h5" gutterBottom>
-              Scan for Duplicates
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              Choose where to look and how closely photos should match before
-              review begins.
-            </Typography>
-          </Box>
-        </Box>
+        )}
 
         {resumeCheckpoint && (
           <Alert
@@ -173,35 +234,176 @@ export function ScanConfig({
           </Button>
         )}
 
-        <Button
-          variant="contained"
-          fullWidth
-          size="large"
-          startIcon={<SearchRoundedIcon />}
-          onClick={() => onStartScan()}
-          disabled={dateRangeInvalid}
-          sx={{ mb: 2 }}>
-          {isIcloud
-            ? "Check loaded iCloud photos"
-            : settings.albumScope
-              ? "Check this album"
-              : settings.dateRange?.from || settings.dateRange?.to
-                ? "Check this date range"
-                : "Check entire library"}
-        </Button>
-
-        {isIcloud && (
-          <Alert severity="info" sx={{ mb: 2 }}>
-            iCloud support scans media currently loaded in the iCloud Photos web
-            page. Scroll the iCloud library to load more items before scanning.
-            Trash and restore actions remain Google Photos-only.
-          </Alert>
+        {!compact && (
+          <Paper
+            variant="outlined"
+            sx={{
+              p: 2,
+              mb: 2,
+              borderRadius: 2,
+              bgcolor: "rgba(255,255,255,0.64)"
+            }}>
+            <Stack
+              direction="column"
+              spacing={2}
+              alignItems={{ xs: "stretch", md: "center" }}>
+              <Box sx={{ flex: 1, minWidth: 0 }}>
+                <Typography variant="overline" color="text.secondary">
+                  Step 1
+                </Typography>
+                <Typography variant="subtitle1" fontWeight={700}>
+                  Choose your photo library
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  {providerHelpText(sourceProvider)}
+                </Typography>
+              </Box>
+              <Box sx={{ minWidth: 0, width: "100%" }}>
+                <ToggleButtonGroup
+                  value={sourceProvider}
+                  exclusive
+                  size="small"
+                  fullWidth
+                  aria-label="Photo source"
+                  onChange={(_, value) => {
+                    if (value !== null) {
+                      const provider = value as PhotoProvider
+                      onSettingsChange({
+                        sourceProvider: provider,
+                        albumScope:
+                          provider === "google"
+                            ? settings.albumScope
+                            : undefined
+                      })
+                    }
+                  }}>
+                  <ToggleButton value="google">Google Photos</ToggleButton>
+                  <ToggleButton value="icloud">iCloud Photos</ToggleButton>
+                  <ToggleButton value="amazon">Amazon Photos</ToggleButton>
+                </ToggleButtonGroup>
+                <Button
+                  href={providerUrl(sourceProvider)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  size="small"
+                  startIcon={<OpenInNewRoundedIcon />}
+                  sx={{ mt: 1 }}>
+                  Open {providerLabel(sourceProvider)}
+                </Button>
+              </Box>
+            </Stack>
+          </Paper>
         )}
 
-        {showUnscopedFullScanWarning && (
+        <Paper
+          variant="outlined"
+          sx={{
+            p: compact ? 0 : 2,
+            mb: compact ? 1 : 2,
+            borderRadius: 2,
+            borderColor: compact ? "transparent" : "divider",
+            bgcolor: compact ? "transparent" : "rgba(255,255,255,0.64)"
+          }}>
+          {!compact && (
+            <>
+              <Typography variant="overline" color="text.secondary">
+                Step 2
+              </Typography>
+              <Typography variant="subtitle1" fontWeight={700} gutterBottom>
+                Choose what to check
+              </Typography>
+            </>
+          )}
+          {supportsAlbumScope ? (
+            <>
+              <TextField
+                select
+                label="Library area"
+                size="small"
+                fullWidth
+                value={settings.albumScope?.mediaKey ?? ""}
+                helperText={
+                  albumLabel
+                    ? `Only checking ${albumLabel}.`
+                    : "Check your full Google Photos timeline, or narrow this to one album."
+                }
+                onChange={(event) => {
+                  const mediaKey = event.target.value
+                  if (!mediaKey) {
+                    onSettingsChange({ albumScope: undefined })
+                    return
+                  }
+                  const album = albums.find((a) => a.mediaKey === mediaKey)
+                  onSettingsChange({
+                    albumScope: {
+                      mediaKey,
+                      title: album?.title,
+                      itemCount: album?.itemCount,
+                      isShared: album?.isShared
+                    }
+                  })
+                }}>
+                <MenuItem value="">Entire library timeline</MenuItem>
+                {albums.map((album) => (
+                  <MenuItem key={album.mediaKey} value={album.mediaKey}>
+                    {album.title}
+                    {album.itemCount !== undefined
+                      ? ` (${album.itemCount.toLocaleString()})`
+                      : ""}
+                    {album.isShared ? " - shared" : ""}
+                  </MenuItem>
+                ))}
+              </TextField>
+              <Box
+                sx={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  mt: 1,
+                  gap: 1
+                }}>
+                <Typography variant="caption" color="text.secondary">
+                  {albumsLoading
+                    ? "Loading albums..."
+                    : albumsError
+                      ? albumsError
+                      : `${albums.length.toLocaleString()} album${
+                          albums.length !== 1 ? "s" : ""
+                        } available.`}
+                </Typography>
+                {onRefreshAlbums && (
+                  <Button
+                    size="small"
+                    disabled={albumsLoading}
+                    onClick={onRefreshAlbums}>
+                    Refresh albums
+                  </Button>
+                )}
+              </Box>
+            </>
+          ) : (
+            <Stack direction="row" spacing={1.5} alignItems="flex-start">
+              <CloudQueueRoundedIcon color="primary" sx={{ mt: 0.25 }} />
+              <Box>
+                <Typography variant="body2">
+                  {isIcloud
+                    ? "The scan reads iCloud Photos items from the connected tab."
+                    : "The scan reads Amazon Photos items from the connected Canada tab."}
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {isIcloud
+                    ? "Leave iCloud Photos open and signed in while the extension collects items."
+                    : "Leave Amazon Photos open and signed in while the extension pages through the library."}
+                </Typography>
+              </Box>
+            </Stack>
+          )}
+        </Paper>
+
+        {showUnscopedFullScanWarning && !compact && (
           <Alert severity="warning" sx={{ mb: 2 }}>
-            Full-library comparison can be slow and memory-heavy on large Google
-            Photos libraries. Full mode compares every item pair in{" "}
+            Full-library comparison can be slow and memory-heavy on large photo
+            libraries. Full mode compares every item pair in{" "}
             {FULL_SCAN_BLOCK_SIZE.toLocaleString()}-item blocks, so it can catch
             duplicates uploaded years apart without loading the whole comparison
             matrix at once.
@@ -211,6 +413,43 @@ export function ScanConfig({
         {dateRangeInvalid && (
           <Alert severity="error" sx={{ mb: 2 }}>
             The start date must be before the end date.
+          </Alert>
+        )}
+
+        {batchLimit && (
+          <Alert severity="info" sx={{ mb: 2 }}>
+            Test batch is on. This scan will check only{" "}
+            {batchLimit.toLocaleString()} {providerLabel(sourceProvider)} item
+            {batchLimit === 1 ? "" : "s"}. Clear the test batch size for the
+            full library.
+          </Alert>
+        )}
+
+        <Button
+          variant="contained"
+          fullWidth
+          size="large"
+          startIcon={<SearchRoundedIcon />}
+          onClick={() => onStartScan()}
+          disabled={dateRangeInvalid}
+          sx={{
+            mb: compact ? 1 : 2,
+            minHeight: compact ? 42 : undefined,
+            borderRadius: 2
+          }}>
+          {settings.albumScope && supportsAlbumScope
+            ? "Check this album"
+            : batchLimit
+              ? `Check ${batchLimit.toLocaleString()} item test batch`
+              : settings.dateRange?.from || settings.dateRange?.to
+                ? "Check this date range"
+                : "Check entire library"}
+        </Button>
+
+        {showUnscopedFullScanWarning && compact && (
+          <Alert severity="warning" sx={{ mb: 1 }}>
+            Full-library scans can be slow on large libraries. Use albums or
+            dates to narrow the first pass.
           </Alert>
         )}
 
@@ -225,34 +464,14 @@ export function ScanConfig({
             "&:before": { display: "none" }
           }}>
           <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-            <Typography variant="body2" color="text.secondary">
-              More options
+            <Typography
+              variant="body2"
+              fontWeight={compact ? 700 : undefined}
+              color={compact ? "text.primary" : "text.secondary"}>
+              {compact ? "Scan options" : "More options"}
             </Typography>
           </AccordionSummary>
           <AccordionDetails>
-            <Box sx={{ mb: 3 }}>
-              <Typography variant="body2" fontWeight={500} sx={{ mb: 1 }}>
-                Photo source
-              </Typography>
-              <ToggleButtonGroup
-                value={sourceProvider}
-                exclusive
-                size="small"
-                fullWidth
-                onChange={(_, value) => {
-                  if (value !== null) {
-                    onSettingsChange({
-                      sourceProvider: value,
-                      albumScope:
-                        value === "icloud" ? undefined : settings.albumScope
-                    })
-                  }
-                }}>
-                <ToggleButton value="google">Google Photos</ToggleButton>
-                <ToggleButton value="icloud">iCloud Photos</ToggleButton>
-              </ToggleButtonGroup>
-            </Box>
-
             <Box sx={{ mb: 3 }}>
               <Typography variant="body2" fontWeight={500} sx={{ mb: 1 }}>
                 How broad should the search be?
@@ -309,74 +528,57 @@ export function ScanConfig({
               </Box>
             )}
 
-            {!isIcloud && (
+            {sourceProvider === "amazon" && (
               <Box sx={{ mb: 3 }}>
                 <Typography variant="body2" fontWeight={500} sx={{ mb: 1 }}>
-                  Where should we look?
+                  Amazon test batch size
                 </Typography>
                 <TextField
-                  select
-                  label="Library area"
+                  type="number"
                   size="small"
                   fullWidth
-                  value={settings.albumScope?.mediaKey ?? ""}
-                  helperText={
-                    albumLabel
-                      ? `Only checking ${albumLabel}.`
-                      : "Use the full library timeline."
-                  }
+                  value={settings.amazonBatchLimit ?? ""}
+                  inputProps={{ min: 1, step: 1 }}
+                  placeholder="Full library"
                   onChange={(event) => {
-                    const mediaKey = event.target.value
-                    if (!mediaKey) {
-                      onSettingsChange({ albumScope: undefined })
-                      return
-                    }
-                    const album = albums.find((a) => a.mediaKey === mediaKey)
+                    const raw = event.target.value
+                    const value = raw ? Number(raw) : undefined
                     onSettingsChange({
-                      albumScope: {
-                        mediaKey,
-                        title: album?.title,
-                        itemCount: album?.itemCount,
-                        isShared: album?.isShared
-                      }
+                      amazonBatchLimit:
+                        value && Number.isFinite(value)
+                          ? Math.max(1, Math.floor(value))
+                          : undefined
                     })
-                  }}>
-                  <MenuItem value="">Entire library timeline</MenuItem>
-                  {albums.map((album) => (
-                    <MenuItem key={album.mediaKey} value={album.mediaKey}>
-                      {album.title}
-                      {album.itemCount !== undefined
-                        ? ` (${album.itemCount.toLocaleString()})`
-                        : ""}
-                      {album.isShared ? " - shared" : ""}
-                    </MenuItem>
-                  ))}
-                </TextField>
-                <Box
-                  sx={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    mt: 1
-                  }}>
-                  <Typography variant="caption" color="text.secondary">
-                    {albumsLoading
-                      ? "Loading albums..."
-                      : albumsError
-                        ? albumsError
-                        : `${albums.length.toLocaleString()} album${
-                            albums.length !== 1 ? "s" : ""
-                          } available.`}
-                  </Typography>
-                  {onRefreshAlbums && (
-                    <Button
-                      size="small"
-                      disabled={albumsLoading}
-                      onClick={onRefreshAlbums}>
-                      Refresh
-                    </Button>
-                  )}
-                </Box>
+                  }}
+                  helperText="Use 200 or 500 to verify Amazon end-to-end before scanning the full library. Leave blank for the full library."
+                />
+              </Box>
+            )}
+
+            {sourceProvider === "icloud" && (
+              <Box sx={{ mb: 3 }}>
+                <Typography variant="body2" fontWeight={500} sx={{ mb: 1 }}>
+                  iCloud test batch size
+                </Typography>
+                <TextField
+                  type="number"
+                  size="small"
+                  fullWidth
+                  value={settings.icloudBatchLimit ?? ""}
+                  inputProps={{ min: 1, step: 1 }}
+                  placeholder="Full library"
+                  onChange={(event) => {
+                    const raw = event.target.value
+                    const value = raw ? Number(raw) : undefined
+                    onSettingsChange({
+                      icloudBatchLimit:
+                        value && Number.isFinite(value)
+                          ? Math.max(1, Math.floor(value))
+                          : undefined
+                    })
+                  }}
+                  helperText="Use 100 or 200 to verify iCloud end-to-end before scanning the full library. Leave blank for the full library."
+                />
               </Box>
             )}
 

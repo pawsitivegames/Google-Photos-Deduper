@@ -36,6 +36,7 @@ interface ActionBarProps {
   onExportJson: () => void
   onExportCsv: () => void
   onApplyKeepStrategy: (strategy: KeepStrategy) => void
+  compact?: boolean
 }
 
 export function ActionBar({
@@ -53,7 +54,8 @@ export function ActionBar({
   onRescan,
   onExportJson,
   onExportCsv,
-  onApplyKeepStrategy
+  onApplyKeepStrategy,
+  compact = false
 }: ActionBarProps) {
   const [keepMenuAnchor, setKeepMenuAnchor] = useState<HTMLElement | null>(null)
   const keepMenuOpen = Boolean(keepMenuAnchor)
@@ -63,24 +65,24 @@ export function ActionBar({
       elevation={0}
       sx={{
         position: "sticky",
-        top: 80,
+        top: compact ? 48 : 80,
         zIndex: 9,
-        px: { xs: 1.5, md: 2 },
+        px: compact ? 1 : { xs: 1.5, md: 2 },
         py: 1.25,
-        mb: 2,
-        borderRadius: 3,
+        mb: compact ? 1 : 2,
+        borderRadius: compact ? 2 : 3,
         border: "1px solid",
         borderColor: "divider",
-        bgcolor: "rgba(255,255,255,0.78)",
-        backdropFilter: "saturate(180%) blur(24px)",
-        boxShadow: "0 18px 48px rgba(0, 0, 0, 0.08)",
+        bgcolor: compact ? "#FFFFFF" : "rgba(255,255,255,0.78)",
+        backdropFilter: compact ? "none" : "saturate(180%) blur(24px)",
+        boxShadow: compact ? "none" : "0 18px 48px rgba(0, 0, 0, 0.08)",
         display: "flex",
         justifyContent: "space-between",
         alignItems: "center",
         flexWrap: "wrap",
-        gap: 1.5
+        gap: compact ? 1 : 1.5
       }}>
-      <Box sx={{ minWidth: { xs: "100%", sm: 240 } }}>
+      <Box sx={{ minWidth: compact ? "100%" : { xs: "100%", sm: 240 } }}>
         <Typography variant="subtitle2" fontWeight={700}>
           {groupCount.toLocaleString()} duplicate set
           {groupCount !== 1 ? "s" : ""} to review
@@ -102,26 +104,32 @@ export function ActionBar({
           spacing={0.75}
           alignItems="center"
           flexWrap="wrap"
-          useFlexGap>
+          useFlexGap
+          sx={{ width: compact ? "100%" : "auto" }}>
           <ToggleButtonGroup
             value={reviewFilter}
             exclusive
             size="small"
+            fullWidth={compact}
             aria-label="Review filter"
             onChange={(_, value) => {
               if (value !== null) onReviewFilterChange(value)
             }}>
             <ToggleButton value="all">
-              All sets ({totalGroupCount.toLocaleString()})
+              All{compact ? "" : ` sets (${totalGroupCount.toLocaleString()})`}
             </ToggleButton>
             <ToggleButton value="exact">
-              Identical ({exactGroupCount.toLocaleString()})
+              {compact
+                ? "Exact"
+                : `Identical (${exactGroupCount.toLocaleString()})`}
             </ToggleButton>
             <ToggleButton value="similar">
-              Similar ({similarGroupCount.toLocaleString()})
+              Similar{compact ? "" : ` (${similarGroupCount.toLocaleString()})`}
             </ToggleButton>
           </ToggleButtonGroup>
-          <Divider orientation="vertical" flexItem sx={{ my: 0.5 }} />
+          {!compact && (
+            <Divider orientation="vertical" flexItem sx={{ my: 0.5 }} />
+          )}
           <Button
             size="small"
             startIcon={<RefreshRoundedIcon />}
@@ -140,7 +148,9 @@ export function ActionBar({
             onClick={onExportCsv}>
             Spreadsheet
           </Button>
-          <Divider orientation="vertical" flexItem sx={{ my: 0.5 }} />
+          {!compact && (
+            <Divider orientation="vertical" flexItem sx={{ my: 0.5 }} />
+          )}
           <Button
             size="small"
             startIcon={<TuneRoundedIcon />}
@@ -169,7 +179,9 @@ export function ActionBar({
               )
             )}
           </Menu>
-          <Divider orientation="vertical" flexItem sx={{ my: 0.5 }} />
+          {!compact && (
+            <Divider orientation="vertical" flexItem sx={{ my: 0.5 }} />
+          )}
           <Button
             size="small"
             startIcon={<CheckBoxOutlinedIcon />}
@@ -184,16 +196,22 @@ export function ActionBar({
             onClick={onDeselectAll}>
             Skip all
           </Button>
-          <Divider orientation="vertical" flexItem sx={{ my: 0.5 }} />
+          {!compact && (
+            <Divider orientation="vertical" flexItem sx={{ my: 0.5 }} />
+          )}
           <Button
             variant="contained"
             color="error"
             size="small"
             startIcon={<DeleteOutlineRoundedIcon />}
             disabled={duplicateCount === 0}
-            onClick={onTrash}>
-            Move {duplicateCount} Duplicate{duplicateCount !== 1 ? "s" : ""} to
-            Trash
+            onClick={onTrash}
+            sx={compact ? { width: "100%" } : undefined}>
+            {compact
+              ? `Move ${duplicateCount} to Trash`
+              : `Move ${duplicateCount} Duplicate${
+                  duplicateCount !== 1 ? "s" : ""
+                } to Trash`}
           </Button>
         </Stack>
       )}

@@ -37,7 +37,14 @@ function isVideoItem(item: GpdMediaItem): boolean {
 }
 
 function mediaFetchUrl(item: GpdMediaItem): string {
+  if (item.provider && item.provider !== "google") return item.thumb
   return isVideoItem(item) ? `${item.thumb}=dv` : item.thumb
+}
+
+function providerLabel(item: GpdMediaItem): string {
+  if (item.provider === "icloud") return "iCloud Photos"
+  if (item.provider === "amazon") return "Amazon Photos"
+  return "Google Photos"
 }
 
 function useGroupBlobUrls(
@@ -528,7 +535,7 @@ export function PhotoViewerModal({
           />
         ) : null}
 
-        {/* View in Google Photos link */}
+        {/* View in provider link */}
         {item.productUrl && (
           <Link
             href={item.productUrl}
@@ -543,7 +550,7 @@ export function PhotoViewerModal({
               textDecoration: "none",
               "&:hover": { color: "white" }
             }}>
-            {isVideoItem(item) ? "Play in Google Photos" : "View in Google Photos"}
+            {isVideoItem(item) ? "Play in" : "View in"} {providerLabel(item)}
             <OpenInNewIcon sx={{ fontSize: 12 }} />
           </Link>
         )}

@@ -5,6 +5,11 @@
 // Communication with the extension happens via window.postMessage.
 // The bridge content script (google-photos-bridge.ts) relays these to chrome.runtime.
 
+if (window.__GPD_GOOGLE_COMMAND_HANDLER_LOADED__) {
+  console.log("GPD: Command handler already loaded")
+} else {
+window.__GPD_GOOGLE_COMMAND_HANDLER_LOADED__ = true
+
 const GPD_APP_ID = "GPD"
 
 // Number of items per API request for restore operations.
@@ -731,3 +736,4 @@ window.addEventListener("message", async (event) => {
 })
 
 console.log("GPD: Command handler loaded")
+}

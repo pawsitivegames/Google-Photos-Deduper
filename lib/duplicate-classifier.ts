@@ -34,6 +34,17 @@ export function classifyDuplicateItems(
     reasons.push("same dedupKey")
   }
 
+  const exactContentHashes = presentValues(
+    items,
+    (item) => item.exactContentHash
+  )
+  if (
+    exactContentHashes.length === items.length &&
+    allSame(exactContentHashes)
+  ) {
+    reasons.push("same content hash")
+  }
+
   const fileNames = presentValues(items, (item) => item.fileName)
   if (fileNames.length === items.length && allSame(fileNames)) {
     reasons.push("same filename")
@@ -70,6 +81,7 @@ export function classifyDuplicateItems(
   }
 
   const exactByDedupKey = reasons.includes("same dedupKey")
+  const exactByContentHash = reasons.includes("same content hash")
   const exactByMetadata =
     reasons.includes("same filename") &&
     reasons.includes("same dimensions") &&
@@ -87,7 +99,10 @@ export function classifyDuplicateItems(
 
   return {
     duplicateKind:
-      exactByDedupKey || exactByMetadata || exactVideoByMetadata
+      exactByDedupKey ||
+      exactByContentHash ||
+      exactByMetadata ||
+      exactVideoByMetadata
         ? "exact"
         : "similar",
     matchReasons: reasons

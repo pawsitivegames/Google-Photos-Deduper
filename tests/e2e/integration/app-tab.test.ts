@@ -228,7 +228,7 @@ test("clears saved results and selections when a different Google account is det
   })
   const page = await openAppTab(context, extensionId)
 
-  await expect(page.getByText("Scan for Duplicates")).toBeVisible({
+  await expect(page.getByText("Find duplicates from your photo library")).toBeVisible({
     timeout: 8_000
   })
   await expect(page.getByText("1 Duplicate Set Ready")).not.toBeVisible()
@@ -279,7 +279,7 @@ test("clears legacy saved results when the current Google account is known", asy
   })
   const page = await openAppTab(context, extensionId)
 
-  await expect(page.getByText("Scan for Duplicates")).toBeVisible({
+  await expect(page.getByText("Find duplicates from your photo library")).toBeVisible({
     timeout: 8_000
   })
   await expect(page.getByText("1 Duplicate Set Ready")).not.toBeVisible()
@@ -460,7 +460,7 @@ test("clears resumable checkpoint when a different Google account is detected", 
 
   const page = await openAppTab(context, extensionId)
 
-  await expect(page.getByText("Scan for Duplicates")).toBeVisible({
+  await expect(page.getByText("Find duplicates from your photo library")).toBeVisible({
     timeout: 8_000
   })
   await expect(
@@ -722,7 +722,7 @@ test("re-scan clears saved results, selections, and resumable checkpoint", async
   })
 
   await page.getByRole("button", { name: /Scan again/i }).click()
-  await expect(page.getByText("Scan for Duplicates")).toBeVisible({
+  await expect(page.getByText("Find duplicates from your photo library")).toBeVisible({
     timeout: 8_000
   })
 
@@ -741,7 +741,7 @@ test("re-scan clears saved results, selections, and resumable checkpoint", async
   expect(stored.scanCheckpoint).toBeUndefined()
 
   await page.reload()
-  await expect(page.getByText("Scan for Duplicates")).toBeVisible({
+  await expect(page.getByText("Find duplicates from your photo library")).toBeVisible({
     timeout: 8_000
   })
   await expect(page.getByText("1 Duplicate Set Ready")).not.toBeVisible()

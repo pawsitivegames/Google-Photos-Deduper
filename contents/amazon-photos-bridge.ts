@@ -4,8 +4,7 @@ import { APP_ID } from "../lib/types"
 import type { AppMessage } from "../lib/types"
 
 export const config: PlasmoCSConfig = {
-  matches: ["https://www.icloud.com/*"],
-  all_frames: true,
+  matches: ["https://www.amazon.ca/*"],
   run_at: "document_idle"
 }
 
@@ -30,4 +29,4 @@ chrome.runtime.onMessage.addListener((message: AppMessage) => {
   }
 })
 
-console.log("GPD: iCloud bridge content script loaded")
+console.log("GPD: Amazon Photos bridge content script loaded")

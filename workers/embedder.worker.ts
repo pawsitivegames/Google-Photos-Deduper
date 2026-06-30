@@ -191,12 +191,22 @@ self.addEventListener("message", async (event: MessageEvent) => {
   }
 
   if (type === "detectSmart") {
-    const { flatEmbeddings, n, dim, threshold, buckets, timestamps, windowMs } = data as {
+    const {
+      flatEmbeddings,
+      n,
+      dim,
+      threshold,
+      buckets,
+      comparePairs,
+      timestamps,
+      windowMs
+    } = data as {
       flatEmbeddings: Float32Array;
       n: number;
       dim: number;
       threshold: number;
       buckets: number[][];
+      comparePairs?: number[][];
       timestamps?: number[];
       windowMs?: number;
     };
@@ -253,6 +263,15 @@ self.addEventListener("message", async (event: MessageEvent) => {
 
       if (shouldReportProgress)
         self.postMessage({ type: "detectionProgress", current: bi + 1, total: buckets.length });
+    }
+
+    for (const pair of comparePairs || []) {
+      const a = embeddings[pair[0]];
+      const b = embeddings[pair[1]];
+      if (!a || !b) continue;
+      let dot = 0;
+      for (let k = 0; k < dim; k++) dot += a[k] * b[k];
+      if (dot >= threshold) allGroups.push(pair);
     }
 
     self.postMessage({ type: "detectionResults", groups: allGroups });

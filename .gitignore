@@ -30,7 +30,8 @@ tests/perf/bench-baseline.json
 playwright-report/
 
 # Docs
-docs/
+docs/*
+!docs/*.md
 
 # Claude Code
 .claude/settings.local.json

@@ -10,6 +10,7 @@ const STORE_NAME = "embeddings"
 
 export interface CachedMediaMetadata {
   dedupKey: string
+  exactContentHash?: string
   thumb: string
   timestamp: number
   creationTimestamp: number
@@ -38,6 +39,7 @@ export function createCachedMediaMetadata(
 ): CachedMediaMetadata {
   return {
     dedupKey: item.dedupKey,
+    exactContentHash: item.exactContentHash,
     thumb: item.thumb,
     timestamp: item.timestamp,
     creationTimestamp: item.creationTimestamp,

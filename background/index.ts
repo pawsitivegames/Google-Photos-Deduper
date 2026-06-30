@@ -1,9 +1,11 @@
 import { APP_ID } from "../lib/types"
 import type {
   AppMessage,
+  GpdMediaItem,
   GptkCommandMessage,
   GptkProgressMessage,
   GptkResultMessage,
+  LaunchProviderResult,
   PhotoProvider
 } from "../lib/types"
 
@@ -13,6 +15,9 @@ import type {
 // Bidirectional tab mapping: appTabId <-> gpTabId
 const tabMap: Record<number, number> = {}
 const tabProviderMap: Record<number, PhotoProvider> = {}
+let sidePanelHostTabId: number | null = null
+let sidePanelProviderTabId: number | null = null
+let sidePanelProvider: PhotoProvider = "google"
 
 // Pending GPTK command callbacks, keyed by requestId
 const pendingCommands: Record<
@@ -21,27 +26,123 @@ const pendingCommands: Record<
     resolve: (data: unknown) => void
     reject: (error: string) => void
     appTabId: number | null
+    appClientId?: string
   }
 > = {}
 
+type ChromeWithSidePanel = typeof chrome & {
+  sidePanel?: {
+    setPanelBehavior?: (options: {
+      openPanelOnActionClick: boolean
+    }) => Promise<void>
+    setOptions?: (options: {
+      tabId?: number
+      path?: string
+      enabled?: boolean
+    }) => Promise<void>
+    open?: (options: { tabId?: number; windowId?: number }) => Promise<void>
+  }
+}
+
+const sidePanelApi = (chrome as ChromeWithSidePanel).sidePanel
+const SIDE_PANEL_PATH = "tabs/scanner-panel.html"
+const GPTK_COMMAND_TIMEOUT_MS = 3500
+
+function disableDefaultSidePanel(): void {
+  if (!sidePanelApi?.setOptions) return
+  sidePanelApi.setOptions({ enabled: false }).catch((error) => {
+    console.warn("[GPD] unable to disable default side panel", error)
+  })
+}
+
+disableDefaultSidePanel()
+
+function configureActionSidePanelBehavior(): void {
+  if (!sidePanelApi?.setPanelBehavior) return
+  sidePanelApi
+    .setPanelBehavior({ openPanelOnActionClick: true })
+    .catch((error) => {
+      console.warn(
+        "[GPD] unable to configure side panel action behavior",
+        error
+      )
+    })
+}
+
+async function enableSidePanelForTab(tabId: number): Promise<void> {
+  if (!sidePanelApi?.setOptions) return
+  await sidePanelApi.setOptions({
+    tabId,
+    path: SIDE_PANEL_PATH,
+    enabled: true
+  })
+}
+
+function enableActiveSidePanels(): void {
+  chrome.tabs
+    .query({ active: true })
+    .then((tabs) => {
+      for (const tab of tabs) {
+        if (hasTabId(tab)) {
+          enableSidePanelForTab(tab.id).catch((error) => {
+            console.warn("[GPD] unable to enable tab side panel", error)
+          })
+        }
+      }
+    })
+    .catch(() => {})
+}
+
+configureActionSidePanelBehavior()
+
 function providerTabPattern(provider: PhotoProvider = "google"): string {
-  return provider === "icloud"
-    ? "https://www.icloud.com/*"
-    : "https://photos.google.com/*"
+  if (provider === "icloud") return "https://www.icloud.com/*"
+  if (provider === "amazon") return "https://www.amazon.ca/*"
+  return "https://photos.google.com/*"
 }
 
 function providerName(provider: PhotoProvider = "google"): string {
-  return provider === "icloud" ? "iCloud Photos" : "Google Photos"
+  if (provider === "icloud") return "iCloud Photos"
+  if (provider === "amazon") return "Amazon Photos"
+  return "Google Photos"
 }
 
 function providerOpenUrl(provider: PhotoProvider = "google"): string {
-  return provider === "icloud" ? "icloud.com/photos" : "photos.google.com"
+  if (provider === "icloud") return "https://www.icloud.com/photos"
+  if (provider === "amazon") return "https://www.amazon.ca/photos?sf=1"
+  return "https://photos.google.com/"
+}
+
+function tabMatchesProvider(
+  tab: Pick<chrome.tabs.Tab, "url"> | undefined,
+  provider: PhotoProvider
+): boolean {
+  if (!tab?.url) return false
+  try {
+    const url = new URL(tab.url)
+    if (provider === "icloud") return url.hostname === "www.icloud.com"
+    if (provider === "amazon") return url.hostname === "www.amazon.ca"
+    return url.hostname === "photos.google.com"
+  } catch {
+    return false
+  }
+}
+
+function canNavigateTabToProvider(tab: Pick<chrome.tabs.Tab, "url">): boolean {
+  return !tab.url?.startsWith("chrome-extension://")
 }
 
 function hasTabId(tab: Pick<chrome.tabs.Tab, "id">): tab is chrome.tabs.Tab & {
   id: number
 } {
   return tab.id !== undefined && tab.id !== null
+}
+
+function isSidePanelSender(sender: chrome.runtime.MessageSender): boolean {
+  return Boolean(
+    sender.url?.includes(SIDE_PANEL_PATH) ||
+      sender.tab?.url?.includes(SIDE_PANEL_PATH)
+  )
 }
 
 // ============================================================
@@ -64,8 +165,24 @@ function hasTabId(tab: Pick<chrome.tabs.Tab, "id">): tab is chrome.tabs.Tab & {
  * and rejects when no content script is present.
  */
 async function findProviderTab(
-  provider: PhotoProvider = "google"
+  provider: PhotoProvider = "google",
+  preferredTabId?: number | null
 ): Promise<chrome.tabs.Tab | null> {
+  if (preferredTabId !== undefined && preferredTabId !== null) {
+    try {
+      const preferredTab = await chrome.tabs.get(preferredTabId)
+      if (
+        hasTabId(preferredTab) &&
+        tabMatchesProvider(preferredTab, provider) &&
+        (await ensureProviderBridge(preferredTab.id, provider))
+      ) {
+        return preferredTab
+      }
+    } catch {
+      // Fall back to scanning provider tabs below.
+    }
+  }
+
   const tabs = await chrome.tabs.query({ url: providerTabPattern(provider) })
   if (tabs.length === 0) return null
 
@@ -81,17 +198,122 @@ async function findProviderTab(
 
   for (const candidate of sorted) {
     if (!hasTabId(candidate)) continue
-    try {
-      await chrome.tabs.sendMessage(candidate.id, {
-        app: APP_ID,
-        action: "ping"
-      })
+    if (await ensureProviderBridge(candidate.id, provider)) {
       return candidate
-    } catch {
-      // Bridge not loaded in this tab; try the next one.
     }
   }
   return null
+}
+
+async function pingProviderBridge(tabId: number): Promise<boolean> {
+  try {
+    await chrome.tabs.sendMessage(tabId, {
+      app: APP_ID,
+      action: "ping"
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function ensureGoogleMainWorldScripts(tabId: number): Promise<boolean> {
+  const [ready] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: () => ({
+      hasGptk: typeof window.gptkApi !== "undefined",
+      hasCommandHandler: Boolean(
+        (window as typeof window & {
+          __GPD_GOOGLE_COMMAND_HANDLER_LOADED__?: boolean
+        }).__GPD_GOOGLE_COMMAND_HANDLER_LOADED__
+      )
+    })
+  })
+  const state = ready?.result as
+    | { hasGptk?: boolean; hasCommandHandler?: boolean }
+    | undefined
+  if (state?.hasGptk && state.hasCommandHandler) return true
+
+  if (!state?.hasGptk) {
+    for (const file of [
+      "scripts/unsafewindow-shim.js",
+      "scripts/google-photos-toolkit.user.js"
+    ]) {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        files: [file]
+      })
+    }
+  }
+
+  if (!state?.hasCommandHandler) {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      files: ["scripts/google-photos-commands.js"]
+    })
+  }
+
+  const [after] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: () => ({
+      hasGptk: typeof window.gptkApi !== "undefined",
+      hasCommandHandler: Boolean(
+        (window as typeof window & {
+          __GPD_GOOGLE_COMMAND_HANDLER_LOADED__?: boolean
+        }).__GPD_GOOGLE_COMMAND_HANDLER_LOADED__
+      )
+    })
+  })
+  const afterState = after?.result as
+    | { hasGptk?: boolean; hasCommandHandler?: boolean }
+    | undefined
+  return afterState ? Boolean(afterState.hasCommandHandler) : true
+}
+
+function contentScriptFilesForProvider(provider: PhotoProvider): string[] {
+  const pattern = providerTabPattern(provider)
+  const manifest = chrome.runtime.getManifest()
+  return (
+    manifest.content_scripts
+      ?.filter((script) => script.matches?.includes(pattern))
+      .flatMap((script) => script.js ?? []) ?? []
+  )
+}
+
+async function ensureProviderBridge(
+  tabId: number,
+  provider: PhotoProvider
+): Promise<boolean> {
+  if (await pingProviderBridge(tabId)) {
+    if (provider !== "google") return true
+    return ensureGoogleMainWorldScripts(tabId)
+  }
+
+  const files = contentScriptFilesForProvider(provider)
+  if (files.length === 0) return false
+
+  try {
+    for (const file of files) {
+      await chrome.scripting.executeScript({
+        target: {
+          tabId,
+          allFrames: provider === "icloud"
+        },
+        files: [file]
+      })
+    }
+    if (provider === "google") {
+      await ensureGoogleMainWorldScripts(tabId)
+    }
+    return pingProviderBridge(tabId)
+  } catch (error) {
+    console.warn("[GPD] unable to inject provider bridge", error)
+    return false
+  }
 }
 
 async function getReachableMappedProviderTabId(
@@ -114,10 +336,7 @@ async function getReachableMappedProviderTabId(
   }
 
   try {
-    await chrome.tabs.sendMessage(mappedTabId, {
-      app: APP_ID,
-      action: "ping"
-    })
+    if (!(await ensureProviderBridge(mappedTabId, provider))) throw new Error()
     return mappedTabId
   } catch {
     delete tabMap[senderTabId]
@@ -136,6 +355,7 @@ async function getReachableMappedProviderTabId(
 async function getSenderTabId(
   sender: chrome.runtime.MessageSender
 ): Promise<number | null> {
+  if (isSidePanelSender(sender)) return null
   if (sender.tab?.id !== undefined && sender.tab.id !== null) {
     return sender.tab.id
   }
@@ -148,6 +368,184 @@ async function getSenderTabId(
   return null
 }
 
+function appMessage<T extends AppMessage>(message: T, clientId?: string): T {
+  return clientId ? ({ ...message, clientId } as T) : message
+}
+
+function sendToAppContext(
+  tabId: number | null,
+  message: AppMessage,
+  clientId?: string
+): void {
+  const targetedMessage = appMessage(message, clientId)
+  if (tabId !== null) {
+    Promise.resolve(chrome.tabs.sendMessage(tabId, targetedMessage)).catch(
+      () => {
+        if (clientId) {
+          Promise.resolve(chrome.runtime.sendMessage(targetedMessage)).catch(
+            () => {}
+          )
+        }
+      }
+    )
+    return
+  }
+  if (clientId) {
+    Promise.resolve(chrome.runtime.sendMessage(targetedMessage)).catch(() => {})
+  }
+}
+
+async function getMappedProviderTabId(
+  senderTabId: number | null,
+  provider: PhotoProvider
+): Promise<number | null> {
+  if (senderTabId !== null) {
+    return getReachableMappedProviderTabId(senderTabId, provider)
+  }
+  if (sidePanelProviderTabId === null || sidePanelProvider !== provider) {
+    return null
+  }
+  try {
+    if (!(await ensureProviderBridge(sidePanelProviderTabId, provider))) {
+      throw new Error()
+    }
+    return sidePanelProviderTabId
+  } catch {
+    sidePanelProviderTabId = null
+    return null
+  }
+}
+
+function rememberProviderTab(
+  appTabId: number | null,
+  providerTabId: number,
+  provider: PhotoProvider
+): void {
+  if (appTabId !== null) {
+    tabMap[appTabId] = providerTabId
+    tabMap[providerTabId] = appTabId
+    tabProviderMap[appTabId] = provider
+    tabProviderMap[providerTabId] = provider
+    return
+  }
+  sidePanelProviderTabId = providerTabId
+  sidePanelProvider = provider
+}
+
+async function openSidePanelForTab(tabId: number): Promise<boolean> {
+  if (!sidePanelApi?.setOptions || !sidePanelApi.open) return false
+
+  await sidePanelApi.setOptions({
+    tabId,
+    path: SIDE_PANEL_PATH,
+    enabled: true
+  })
+  await sidePanelApi.open({ tabId })
+  return true
+}
+
+async function handleActionClick(tab: chrome.tabs.Tab): Promise<void> {
+  if (!hasTabId(tab)) return
+  sidePanelHostTabId = tab.id
+  const opened = await openSidePanelForTab(tab.id)
+  if (!opened) {
+    await chrome.tabs.create({ url: chrome.runtime.getURL("tabs/app.html") })
+  }
+}
+
+chrome.action.onClicked.addListener((tab) => {
+  handleActionClick(tab).catch((error) => {
+    console.warn("[GPD] unable to open tab-scoped side panel", error)
+  })
+})
+
+chrome.tabs.onActivated?.addListener((activeInfo) => {
+  sidePanelHostTabId = activeInfo.tabId
+  enableSidePanelForTab(activeInfo.tabId).catch((error) => {
+    console.warn("[GPD] unable to enable activated tab side panel", error)
+  })
+})
+
+chrome.tabs.onUpdated?.addListener((tabId, changeInfo, tab) => {
+  if (!tab.active && changeInfo.status !== "complete") return
+  enableSidePanelForTab(tabId).catch((error) => {
+    console.warn("[GPD] unable to enable updated tab side panel", error)
+  })
+})
+
+enableActiveSidePanels()
+
+async function openProviderInCurrentTab(
+  provider: PhotoProvider,
+  tab?: chrome.tabs.Tab,
+  preferredTabId?: number | null,
+  allowCreate = true
+): Promise<chrome.tabs.Tab | null> {
+  const url = providerOpenUrl(provider)
+  const seenTabIds = new Set<number>()
+
+  async function tryOpenCandidate(
+    targetTab: chrome.tabs.Tab | undefined
+  ): Promise<chrome.tabs.Tab | null> {
+    if (!targetTab || !hasTabId(targetTab) || seenTabIds.has(targetTab.id)) {
+      return null
+    }
+    seenTabIds.add(targetTab.id)
+    if (!canNavigateTabToProvider(targetTab)) return null
+    if (tabMatchesProvider(targetTab, provider)) {
+      return (
+        (await chrome.tabs
+          .update(targetTab.id, { active: true })
+          .catch(() => undefined)) ?? targetTab
+      )
+    }
+    try {
+      return await chrome.tabs.update(targetTab.id, { url, active: true })
+    } catch {
+      // Some Chrome-owned pages reject tab updates. Try another real tab in
+      // the same window before falling back to create/failure behavior.
+      return null
+    }
+  }
+
+  const senderTabResult = await tryOpenCandidate(tab)
+  if (senderTabResult) return senderTabResult
+
+  if (preferredTabId !== undefined && preferredTabId !== null) {
+    const preferredTab = await chrome.tabs
+      .get(preferredTabId)
+      .catch(() => undefined)
+    const preferredResult = await tryOpenCandidate(preferredTab)
+    if (preferredResult) return preferredResult
+  }
+
+  const [activeTab] = await chrome.tabs.query({
+    active: true,
+    currentWindow: true
+  })
+  const activeResult = await tryOpenCandidate(activeTab)
+  if (activeResult) return activeResult
+
+  for (const windowTab of await chrome.tabs.query({ currentWindow: true })) {
+    const windowResult = await tryOpenCandidate(windowTab)
+    if (windowResult) return windowResult
+  }
+
+  if (!allowCreate) return null
+  return chrome.tabs.create({ url, active: true })
+}
+
+function launchProviderError(
+  provider: PhotoProvider,
+  error: string
+): LaunchProviderResult {
+  return {
+    success: false,
+    provider,
+    error
+  }
+}
+
 // ============================================================
 // Send a GPTK command to the Google Photos tab and await result
 // ============================================================
@@ -158,6 +556,313 @@ function generateRequestId(): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function stopPendingCommandsForSidePanel(clientId?: string): void {
+  if (!clientId) return
+
+  for (const [requestId, pending] of Object.entries(pendingCommands)) {
+    if (pending.appClientId === clientId) {
+      pending.reject("Side panel closed.")
+      delete pendingCommands[requestId]
+    }
+  }
+
+  sidePanelProviderTabId = null
+  sidePanelHostTabId = null
+}
+
+async function collectIcloudMediaInFrame(args?: {
+  limit?: number
+}): Promise<GpdMediaItem[]> {
+  function sleepInFrame(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms))
+  }
+
+  function hashString(value: string): string {
+    let hash = 2166136261
+    for (let index = 0; index < value.length; index++) {
+      hash ^= value.charCodeAt(index)
+      hash = Math.imul(hash, 16777619)
+    }
+    return (hash >>> 0).toString(36)
+  }
+
+  function imageSource(image: HTMLImageElement): string {
+    return image.currentSrc || image.src || ""
+  }
+
+  function stableImageIdentity(source: string): string {
+    try {
+      const url = new URL(source, location.href)
+      if (url.hostname.endsWith("icloud-content.com")) {
+        return `${url.origin}${url.pathname}`
+      }
+      return url.href
+    } catch {
+      return source
+    }
+  }
+
+  function elementLabel(element: Element): string {
+    return (
+      element.getAttribute("aria-label") ||
+      element.getAttribute("alt") ||
+      element.getAttribute("title") ||
+      element.closest("[aria-label], [title]")?.getAttribute("aria-label") ||
+      ""
+    ).trim()
+  }
+
+  function thumbnailFor(image: HTMLImageElement, source: string): string {
+    if (!source.startsWith("blob:")) return source
+    try {
+      const naturalWidth = image.naturalWidth || Math.round(image.width)
+      const naturalHeight = image.naturalHeight || Math.round(image.height)
+      const maxEdge = 64
+      const scale = Math.min(1, maxEdge / Math.max(naturalWidth, naturalHeight))
+      const canvas = document.createElement("canvas")
+      canvas.width = Math.max(1, Math.round(naturalWidth * scale))
+      canvas.height = Math.max(1, Math.round(naturalHeight * scale))
+      const context = canvas.getContext("2d")
+      if (!context) return source
+      context.drawImage(image, 0, 0, canvas.width, canvas.height)
+      return canvas.toDataURL("image/jpeg", 0.55)
+    } catch {
+      return source
+    }
+  }
+
+  function tileIdentity(
+    image: HTMLImageElement,
+    scrollRoot?: HTMLElement
+  ): string {
+    const rect = image.getBoundingClientRect()
+    const rootRect = scrollRoot?.getBoundingClientRect()
+    const scrollTop = scrollRoot?.scrollTop ?? window.scrollY
+    const scrollLeft = scrollRoot?.scrollLeft ?? window.scrollX
+    const absoluteTop = rect.top - (rootRect?.top ?? 0) + scrollTop
+    const absoluteLeft = rect.left - (rootRect?.left ?? 0) + scrollLeft
+    const width = rect.width || image.naturalWidth || image.width
+    const height = rect.height || image.naturalHeight || image.height
+
+    if (width > 0 || height > 0) {
+      return [
+        Math.round(absoluteTop / 4),
+        Math.round(absoluteLeft / 4),
+        Math.round(width),
+        Math.round(height)
+      ].join(":")
+    }
+
+    return imageSource(image)
+  }
+
+  const route = location.href.toLowerCase()
+  if (route.includes("recentlydeleted") || route.includes("/hidden")) return []
+
+  function collectImages(root: Document | Element): HTMLImageElement[] {
+    const images = Array.from(root.querySelectorAll("img"))
+    for (const frame of Array.from(root.querySelectorAll("iframe"))) {
+      try {
+        if (frame.contentDocument) {
+          images.push(...collectImages(frame.contentDocument))
+        }
+      } catch {
+        // Cross-origin frames cannot be inspected; iCloud's app frame is same-origin.
+      }
+    }
+    return images
+  }
+
+  const items: GpdMediaItem[] = []
+  const seenItems = new Set<string>()
+  const maxItems =
+    typeof args?.limit === "number" && Number.isFinite(args.limit)
+      ? Math.max(1, Math.floor(args.limit))
+      : Number.POSITIVE_INFINITY
+
+  async function waitForImages(root: Document | Element): Promise<void> {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      if (
+        collectImages(root).some((image) => {
+          const source = imageSource(image)
+          const width = image.naturalWidth || image.width
+          const height = image.naturalHeight || image.height
+          return source && width >= 40 && height >= 40
+        })
+      ) {
+        return
+      }
+      await sleepInFrame(500)
+    }
+  }
+
+  function collectRenderedImages(
+    root: Document | Element,
+    scrollRoot?: HTMLElement
+  ): void {
+    const images = collectImages(root).filter((image) => {
+      const source = imageSource(image)
+      const width = image.naturalWidth || image.width
+      const height = image.naturalHeight || image.height
+      return (
+        source &&
+        !/^data:image\/svg/i.test(source) &&
+        width >= 40 &&
+        height >= 40
+      )
+    })
+
+    for (let index = 0; index < images.length; index++) {
+      try {
+        if (items.length >= maxItems) return
+        const image = images[index]
+        const source = imageSource(image)
+        const identity =
+          stableImageIdentity(source) || tileIdentity(image, scrollRoot)
+        if (!identity || seenItems.has(identity)) continue
+        seenItems.add(identity)
+        const thumb = thumbnailFor(image, source)
+        if (!thumb) continue
+        const label = elementLabel(image)
+        const mediaKey = `icloud-${hashString(identity)}`
+        items.push({
+          mediaKey,
+          dedupKey: mediaKey,
+          thumb,
+          provider: "icloud",
+          productUrl: location.href,
+          timestamp: Date.now(),
+          creationTimestamp: Date.now(),
+          resWidth: Math.round(image.naturalWidth || image.width) || undefined,
+          resHeight:
+            Math.round(image.naturalHeight || image.height) || undefined,
+          fileName: label || `iCloud Photo ${items.length + 1}`,
+          takesUpSpace: null,
+          isOriginalQuality: null
+        })
+      } catch {
+        // Keep the scan moving if one virtualized thumbnail cannot be serialized.
+      }
+    }
+  }
+
+  function scrollableRoots(): HTMLElement[] {
+    return Array.from(document.querySelectorAll<HTMLElement>("*"))
+      .filter((element) => {
+        const rect = element.getBoundingClientRect()
+        return (
+          element.scrollHeight > element.clientHeight + 100 &&
+          element.clientHeight > 100 &&
+          rect.width > 100 &&
+          rect.height > 100
+        )
+      })
+      .sort((a, b) => b.scrollHeight - a.scrollHeight)
+  }
+
+  const scrollRoot =
+    document.querySelector<HTMLElement>(".grid-scroll") ??
+    document.querySelector<HTMLElement>("[class*='grid-scroll']") ??
+    scrollableRoots()[0]
+
+  await waitForImages(scrollRoot ?? document)
+
+  if (!scrollRoot) {
+    collectRenderedImages(document)
+    return items
+  }
+
+  const originalScrollTop = scrollRoot.scrollTop
+  const step = Math.max(240, Math.floor(scrollRoot.clientHeight * 0.5))
+  const maxPasses = Math.max(
+    120,
+    Math.min(2000, Math.ceil(scrollRoot.scrollHeight / step) + 20)
+  )
+  let previousScrollTop = -1
+  let stagnantPasses = 0
+
+  scrollRoot.scrollTop = 0
+  await sleepInFrame(900)
+
+  for (let pass = 0; pass < maxPasses; pass++) {
+    const beforeCount = items.length
+    collectRenderedImages(scrollRoot, scrollRoot)
+    if (items.length === beforeCount) stagnantPasses++
+    else stagnantPasses = 0
+
+    const atBottom =
+      scrollRoot.scrollTop + scrollRoot.clientHeight >=
+      scrollRoot.scrollHeight - 4
+    if (atBottom || stagnantPasses >= 12 || items.length >= maxItems) break
+
+    previousScrollTop = scrollRoot.scrollTop
+    scrollRoot.scrollTop = Math.min(
+      scrollRoot.scrollHeight,
+      scrollRoot.scrollTop + step
+    )
+    if (scrollRoot.scrollTop === previousScrollTop) break
+    await sleepInFrame(450)
+  }
+
+  scrollRoot.scrollTop = originalScrollTop
+  return items
+}
+
+async function sendIcloudDirectScan(
+  providerTabId: number,
+  appTabId: number,
+  message: GptkCommandMessage
+): Promise<void> {
+  try {
+    const frames = await chrome.webNavigation.getAllFrames({
+      tabId: providerTabId
+    })
+    const appFrameIds =
+      frames
+        ?.filter((frame) => frame.url.includes("/applications/photos"))
+        .map((frame) => frame.frameId) ?? []
+    const results = await chrome.scripting.executeScript({
+      target:
+        appFrameIds.length > 0
+          ? { tabId: providerTabId, frameIds: appFrameIds }
+          : { tabId: providerTabId, allFrames: true },
+      func: collectIcloudMediaInFrame,
+      args: [message.args as { limit?: number } | undefined]
+    })
+    const items =
+      results
+        .map((result) => result.result ?? [])
+        .sort((a, b) => b.length - a.length)[0] ?? []
+    chrome.tabs.sendMessage(appTabId, {
+      app: APP_ID,
+      action: "gptkProgress",
+      command: message.command,
+      requestId: message.requestId,
+      itemsProcessed: items.length,
+      message: `Collected ${items.length} loaded iCloud items from the page`
+    } as GptkProgressMessage)
+    chrome.tabs.sendMessage(appTabId, {
+      app: APP_ID,
+      action: "gptkResult",
+      command: message.command,
+      requestId: message.requestId,
+      success: true,
+      data: items
+    } as GptkResultMessage)
+  } catch (error) {
+    chrome.tabs.sendMessage(appTabId, {
+      app: APP_ID,
+      action: "gptkResult",
+      command: message.command,
+      requestId: message.requestId,
+      success: false,
+      error: error instanceof Error ? error.message : String(error)
+    } as GptkResultMessage)
+  } finally {
+    delete pendingCommands[message.requestId]
+  }
 }
 
 async function sendGptkCommand(
@@ -178,8 +883,37 @@ async function sendGptkCommand(
   }
 
   return new Promise((resolve, reject) => {
-    pendingCommands[requestId] = { resolve, reject, appTabId: null }
-    chrome.tabs.sendMessage(gpTabId, message).catch(() => {
+    const timeoutId = setTimeout(() => {
+      delete pendingCommands[requestId]
+      reject(
+        `Timed out waiting for ${providerName(provider)} to respond. Please reload the tab and try again.`
+      )
+    }, GPTK_COMMAND_TIMEOUT_MS)
+    pendingCommands[requestId] = {
+      resolve: (data) => {
+        clearTimeout(timeoutId)
+        resolve(data)
+      },
+      reject: (error) => {
+        clearTimeout(timeoutId)
+        reject(error)
+      },
+      appTabId: null
+    }
+    const delivery =
+      provider === "icloud"
+        ? chrome.scripting.executeScript({
+            target: { tabId: gpTabId, allFrames: true },
+            world: "MAIN",
+            func: (commandMessage: GptkCommandMessage) => {
+              window.postMessage(commandMessage, "*")
+            },
+            args: [message]
+          })
+        : chrome.tabs.sendMessage(gpTabId, message)
+
+    delivery.catch(() => {
+      clearTimeout(timeoutId)
       delete pendingCommands[requestId]
       reject(
         `Unable to connect to ${providerName(provider)} tab. Please reload the tab and try again.`
@@ -188,18 +922,60 @@ async function sendGptkCommand(
   })
 }
 
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "gpd-side-panel") return
+
+  let clientId: string | undefined
+  port.onMessage.addListener((message: unknown) => {
+    const payload = message as {
+      app?: string
+      action?: string
+      clientId?: string
+      activeTabId?: number
+    }
+    if (payload?.app !== APP_ID || payload.action !== "sidePanel.ready") return
+    clientId = payload.clientId
+    if (typeof payload.activeTabId === "number") {
+      sidePanelHostTabId = payload.activeTabId
+    }
+  })
+  port.onDisconnect.addListener(() => {
+    stopPendingCommandsForSidePanel(clientId)
+  })
+})
+
 // ============================================================
 // Message handler
 // ============================================================
 
 chrome.runtime.onMessage.addListener(
-  (message: AppMessage, sender: chrome.runtime.MessageSender) => {
+  (
+    message: AppMessage,
+    sender: chrome.runtime.MessageSender,
+    sendResponse: (response?: unknown) => void
+  ) => {
     if (message?.app !== APP_ID) return
 
     switch (message.action) {
       case "launchApp":
         handleLaunchApp(sender)
         break
+      case "launchProvider":
+        handleLaunchProvider(
+          message.provider ?? "google",
+          sender,
+          message.hostTabId
+        )
+          .then(sendResponse)
+          .catch((error) => {
+            sendResponse(
+              launchProviderError(
+                message.provider ?? "google",
+                error instanceof Error ? error.message : String(error)
+              )
+            )
+          })
+        return true
       case "healthCheck":
         handleHealthCheck(message, sender)
         break
@@ -236,6 +1012,42 @@ async function handleLaunchApp(
   }
 }
 
+async function handleLaunchProvider(
+  provider: PhotoProvider,
+  sender: chrome.runtime.MessageSender,
+  hostTabId?: number
+): Promise<LaunchProviderResult> {
+  const fromSidePanel = isSidePanelSender(sender)
+  const preferredTabId =
+    typeof hostTabId === "number" ? hostTabId : sidePanelHostTabId
+  const providerTab = await openProviderInCurrentTab(
+    provider,
+    fromSidePanel ? undefined : sender.tab,
+    preferredTabId,
+    !fromSidePanel
+  )
+  if (!providerTab || !hasTabId(providerTab)) {
+    return launchProviderError(
+      provider,
+      `Could not open ${providerName(provider)} in this window. Open a normal web tab, then click the extension again.`
+    )
+  }
+
+  rememberProviderTab(null, providerTab.id, provider)
+  sidePanelHostTabId = providerTab.id
+  try {
+    await openSidePanelForTab(providerTab.id)
+  } catch (error) {
+    console.warn("[GPD] unable to open side panel", error)
+  }
+  return {
+    success: true,
+    provider,
+    tabId: providerTab.id,
+    alreadyOpen: tabMatchesProvider(providerTab, provider)
+  }
+}
+
 async function handleHealthCheck(
   message: AppMessage,
   sender: chrome.runtime.MessageSender
@@ -243,56 +1055,71 @@ async function handleHealthCheck(
   const provider =
     message.action === "healthCheck" ? message.provider ?? "google" : "google"
   const senderTabId = await getSenderTabId(sender)
+  const clientId = message.clientId
 
-  const providerTab = await findProviderTab(provider)
+  const providerTab = await findProviderTab(provider, sidePanelHostTabId)
   if (!providerTab || !hasTabId(providerTab)) {
-    if (senderTabId !== null) {
-      chrome.tabs.sendMessage(senderTabId, {
+    sendToAppContext(
+      senderTabId,
+      {
         app: APP_ID,
         action: "healthCheck.result",
         provider,
         success: false,
         hasGptk: false
-      })
-    }
+      },
+      clientId
+    )
     return
   }
 
-  if (senderTabId !== null) {
-    tabMap[senderTabId] = providerTab.id
-    tabMap[providerTab.id] = senderTabId
-    tabProviderMap[senderTabId] = provider
-    tabProviderMap[providerTab.id] = provider
-  }
+  rememberProviderTab(senderTabId, providerTab.id, provider)
 
   try {
-    const result = await sendGptkCommand(
+    let result = await sendGptkCommand(
       providerTab.id,
       "healthCheck",
       undefined,
       provider
     )
-    if (senderTabId !== null) {
-      const r = result as { hasGptk: boolean; accountEmail?: string }
-      chrome.tabs.sendMessage(senderTabId, {
+    let r = result as { hasGptk: boolean; accountEmail?: string }
+    if (provider === "google" && !r.hasGptk) {
+      const injected = await ensureGoogleMainWorldScripts(providerTab.id)
+      if (injected) {
+        result = await sendGptkCommand(
+          providerTab.id,
+          "healthCheck",
+          undefined,
+          provider
+        )
+        r = result as { hasGptk: boolean; accountEmail?: string }
+      }
+    }
+    sendToAppContext(
+      senderTabId,
+      {
         app: APP_ID,
         action: "healthCheck.result",
         provider,
-        success: true,
+        success: Boolean(r.hasGptk),
         hasGptk: r.hasGptk,
         accountEmail: r.accountEmail
-      })
-    }
-  } catch {
-    if (senderTabId !== null) {
-      chrome.tabs.sendMessage(senderTabId, {
+      },
+      clientId
+    )
+  } catch (error) {
+    sendToAppContext(
+      senderTabId,
+      {
         app: APP_ID,
         action: "healthCheck.result",
         provider,
         success: false,
-        hasGptk: false
-      })
-    }
+        hasGptk: false,
+        error: error instanceof Error ? error.message : String(error)
+      },
+      clientId
+    )
   }
 }
 
@@ -301,53 +1128,96 @@ async function handleGptkCommand(
   sender: chrome.runtime.MessageSender
 ): Promise<void> {
   const senderTabId = await getSenderTabId(sender)
-  if (senderTabId === null) return
   const provider = message.provider ?? "google"
 
-  let providerTabId = await getReachableMappedProviderTabId(
-    senderTabId,
-    provider
-  )
+  let providerTabId = await getMappedProviderTabId(senderTabId, provider)
   if (providerTabId === null) {
-    const providerTab = await findProviderTab(provider)
+    const providerTab = await findProviderTab(provider, sidePanelHostTabId)
     if (!providerTab || !hasTabId(providerTab)) {
-      chrome.tabs.sendMessage(senderTabId, {
-        app: APP_ID,
-        action: "gptkResult",
-        command: message.command,
-        requestId: message.requestId,
-        success: false,
-        error: `${providerName(provider)} tab not found. Please open ${providerOpenUrl(provider)}.`
-      } as GptkResultMessage)
+      sendToAppContext(
+        senderTabId,
+        {
+          app: APP_ID,
+          action: "gptkResult",
+          command: message.command,
+          requestId: message.requestId,
+          success: false,
+          error: `${providerName(provider)} tab not found. Please open ${providerOpenUrl(provider)}.`
+        } as GptkResultMessage,
+        message.clientId
+      )
       return
     }
     providerTabId = providerTab.id
-    tabMap[senderTabId] = providerTabId
-    tabMap[providerTabId] = senderTabId
-    tabProviderMap[senderTabId] = provider
-    tabProviderMap[providerTabId] = provider
+    rememberProviderTab(senderTabId, providerTabId, provider)
   }
 
   pendingCommands[message.requestId] = {
     resolve: () => {},
     reject: () => {},
-    appTabId: senderTabId
+    appTabId: senderTabId,
+    appClientId: message.clientId
   }
 
-  if (provider === "icloud" && message.command === "getAllMediaItems") {
+  if (
+    provider === "icloud" &&
+    (message.command === "getAllMediaItems" || message.command === "trashItems")
+  ) {
     await chrome.tabs.update(providerTabId, { active: true }).catch(() => {})
     await sleep(1500)
   }
 
+  if (provider === "icloud") {
+    const frames = await chrome.webNavigation
+      .getAllFrames({ tabId: providerTabId })
+      .catch(() => [])
+    const appFrameIds =
+      frames
+        ?.filter((frame) => frame.url.includes("/applications/photos"))
+        .map((frame) => frame.frameId) ?? []
+    chrome.scripting
+      .executeScript({
+        target:
+          appFrameIds.length > 0
+            ? { tabId: providerTabId, frameIds: appFrameIds }
+            : { tabId: providerTabId, allFrames: true },
+        world: "MAIN",
+        func: (commandMessage: GptkCommandMessage) => {
+          window.postMessage(commandMessage, "*")
+        },
+        args: [message]
+      })
+      .catch(() => {
+        sendToAppContext(
+          senderTabId,
+          {
+            app: APP_ID,
+            action: "gptkResult",
+            command: message.command,
+            requestId: message.requestId,
+            success: false,
+            error: `Unable to connect to ${providerName(provider)} frames. Please reload the tab and try again.`
+          } as GptkResultMessage,
+          message.clientId
+        )
+        delete pendingCommands[message.requestId]
+      })
+    return
+  }
+
   chrome.tabs.sendMessage(providerTabId, message).catch(() => {
-    chrome.tabs.sendMessage(senderTabId, {
-      app: APP_ID,
-      action: "gptkResult",
-      command: message.command,
-      requestId: message.requestId,
-      success: false,
-      error: `Unable to connect to ${providerName(provider)} tab. Please reload the tab and try again.`
-    } as GptkResultMessage)
+    sendToAppContext(
+      senderTabId,
+      {
+        app: APP_ID,
+        action: "gptkResult",
+        command: message.command,
+        requestId: message.requestId,
+        success: false,
+        error: `Unable to connect to ${providerName(provider)} tab. Please reload the tab and try again.`
+      } as GptkResultMessage,
+      message.clientId
+    )
     delete pendingCommands[message.requestId]
   })
 }
@@ -360,9 +1230,7 @@ function handleGptkResult(
   if (!pending) return
 
   // Relay result to the app tab
-  if (pending.appTabId !== null) {
-    chrome.tabs.sendMessage(pending.appTabId, message)
-  }
+  sendToAppContext(pending.appTabId, message, pending.appClientId)
 
   // Resolve/reject the promise if anyone is awaiting
   if (message.success) {
@@ -379,10 +1247,10 @@ function handleGptkProgress(
   _sender: chrome.runtime.MessageSender
 ): void {
   const pending = pendingCommands[message.requestId]
-  if (!pending || pending.appTabId === null) return
+  if (!pending) return
 
   // Relay progress to the app tab
-  chrome.tabs.sendMessage(pending.appTabId, message)
+  sendToAppContext(pending.appTabId, message, pending.appClientId)
 }
 
 // ============================================================
@@ -390,6 +1258,13 @@ function handleGptkProgress(
 // ============================================================
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  if (sidePanelHostTabId === tabId) {
+    sidePanelHostTabId = null
+  }
+  if (sidePanelProviderTabId === tabId) {
+    sidePanelProviderTabId = null
+  }
+
   const mappedTabId = tabMap[tabId]
   if (mappedTabId !== undefined) {
     delete tabMap[mappedTabId]
@@ -416,11 +1291,6 @@ chrome.tabs.onRemoved.addListener((tabId) => {
       delete pendingCommands[reqId]
     }
   }
-})
-
-// Open the app tab when the extension icon is clicked
-chrome.action.onClicked.addListener(() => {
-  chrome.tabs.create({ url: chrome.runtime.getURL("tabs/app.html") })
 })
 
 console.log("GPD: Service worker loaded")
